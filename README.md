@@ -1,5 +1,9 @@
 # 人民日报金句应用
 
+<img width="1169" height="322" alt="屏幕截图 2025-09-17 194013" src="https://github.com/user-attachments/assets/caf5b576-974f-466e-a4f5-ace7bda1db6b" />
+
+<img width="1625" height="861" alt="屏幕截图 2025-09-17 193820" src="https://github.com/user-attachments/assets/659d7c99-0a06-4a36-a58a-f0a1849ad1cc" />
+
 ## 应用介绍
 这是一个在任务栏左侧随机显示人民日报金句的轻量级服务，旨在通过每日金句为用户提供思想启示和精神鼓励。
 
@@ -33,4 +37,5 @@ pyinstaller --clean quotes.spec
 - 语言优美：用词凝练、对仗工整
 - 励志向上：传递积极乐观的生活态度
 - 贴近生活：结合普通人的生活体验
+
 - 时代感强：反映时代精神与价值追求
