@@ -418,4 +418,55 @@ mod tests {
         }
         assert!(ink > 0, "head must render at the left edge");
     }
+
+    /// Two layers at different positions and opacities must both leave ink.
+    #[test]
+    fn draw_blends_two_layers() {
+        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        s.draw(&[("金句", 15, 0.5), ("金句", 200, 0.5)]);
+        let (w, h) = (s.width as usize, s.height as usize);
+        let buf = s.bits_mut();
+        let mut left_ink = 0;
+        let mut right_ink = 0;
+        for y in 0..h {
+            for xx in 0..100 {
+                if buf[(y * w + xx) * 4 + 3] > 0 {
+                    left_ink += 1;
+                }
+            }
+            for xx in 200..300 {
+                if buf[(y * w + xx) * 4 + 3] > 0 {
+                    right_ink += 1;
+                }
+            }
+        }
+        assert!(left_ink > 0, "first layer must leave ink at x=15");
+        assert!(right_ink > 0, "second layer must leave ink at x=200");
+    }
+
+    /// A layer with zero alpha is a complete no-op.
+    #[test]
+    fn draw_zero_alpha_leaves_no_ink() {
+        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        s.draw(&[("金句", 15, 0.0)]);
+        let buf = s.bits_mut();
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "zero-alpha layer must leave the frame untouched"
+        );
+    }
+
+    /// Layer opacity modulates the accumulated ink end to end: at 0.5 the
+    /// solid-glyph alpha is scale(217, 128) = 109, not the full 217.
+    #[test]
+    fn draw_half_alpha_scales_ink() {
+        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        s.draw(&[("金句", 15, 0.5)]);
+        let buf = s.bits_mut();
+        let max_a = buf.iter().skip(3).step_by(4).copied().max().unwrap_or(0);
+        assert!(
+            (100..=118).contains(&max_a),
+            "half-opacity layer must halve the ink alpha (got {max_a}; full opacity would be {MAX_ALPHA})"
+        );
+    }
 }

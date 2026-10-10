@@ -33,7 +33,7 @@ v2.0.0 起为纯 Rust + Win32 原生实现（原为 Python/PyQt，见文末「�
 
 ```bash
 cargo build --release        # 产物 target/release/JinJuApp.exe，约 250 KB
-cargo test                   # 64 个单元测试
+cargo test                   # 68 个单元测试
 cargo clippy --all-targets -- -D warnings   # 零警告
 powershell -File e2e.ps1     # 18 项端到端冒烟检查
 ```
@@ -60,7 +60,7 @@ powershell -File e2e.ps1     # 18 项端到端冒烟检查
 | 内容更新 | 数据焊死在 exe 内，改一个字要重新发版 | 外置 `quotes.json`，用户即改即生效 |
 | 自启动 | 首次运行静默写注册表，无退出途径 | 默认关闭，托盘一键开关，可退出 |
 | 错误处理 | 数据错误静默吞掉，只显示兜底句 | 错误弹窗直达用户，含原因与修复路径 |
-| 可测性 | 纯逻辑焊死在 QWidget 中，0 测试 | 64 单元测试 + 18 项 E2E，全绿 |
+| 可测性 | 纯逻辑焊死在 QWidget 中，0 测试 | 68 单元测试 + 18 项 E2E，全绿 |
 
 ## 许可
 

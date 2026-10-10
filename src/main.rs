@@ -73,6 +73,20 @@ fn parse_cli(args: &[String]) -> Cli {
 // Application state (owned by the window via GWLP_USERDATA)
 // ---------------------------------------------------------------------------
 
+/// State of an in-flight quote crossfade.
+struct Transition {
+    /// The outgoing quote, fading out where it stands.
+    prev_text: String,
+    /// Its position and opacity at the quote change, captured before the
+    /// scroller resets — the fade starts from exactly what was on screen,
+    /// so a change landing mid-marquee-fade can't pop the old line back
+    /// to full opacity.
+    prev_x: i32,
+    prev_alpha: f32,
+    /// GetTickCount64 at the quote change.
+    start: u64,
+}
+
 struct App {
     hwnd: HWND,
     dpi: u32,
@@ -87,13 +101,8 @@ struct App {
     last_tick_ms: u64,
     last_presented_x: i32,
     last_presented_alpha: i32,
-    /// Previous quote, kept on screen for a TRANSITION_MS crossfade.
-    prev_text: Option<String>,
-    /// X at which the previous quote was last shown (captured before the
-    /// scroller resets for the new text).
-    prev_x: i32,
-    /// GetTickCount64 at the quote change; 0 = no crossfade in flight.
-    transition_start: u64,
+    /// In-flight quote crossfade; `None` = no transition.
+    transition: Option<Transition>,
     exe_path: String,
 }
 
@@ -118,9 +127,7 @@ impl App {
             last_tick_ms: 0,
             last_presented_x: i32::MIN,
             last_presented_alpha: -1,
-            prev_text: None,
-            prev_x: 0,
-            transition_start: 0,
+            transition: None,
             exe_path,
         })
     }
@@ -131,11 +138,16 @@ impl App {
         let new_text = self.quotes.lines()[i].clone();
         // Crossfade: keep the outgoing line at its current spot for one
         // TRANSITION_MS envelope while the new line fades in at rest.
-        // prev_x must be captured before refresh() resets the scroller.
+        // Position AND opacity must be captured before refresh() resets
+        // the scroller — otherwise a change landing mid-marquee-fade
+        // would pop the old line back to full opacity.
         if !self.text.is_empty() && self.text != new_text {
-            self.prev_x = self.scroll.x();
-            self.prev_text = Some(std::mem::replace(&mut self.text, new_text));
-            self.transition_start = unsafe { GetTickCount64() };
+            self.transition = Some(Transition {
+                prev_text: std::mem::replace(&mut self.text, new_text),
+                prev_x: self.scroll.x(),
+                prev_alpha: self.scroll.alpha(),
+                start: unsafe { GetTickCount64() },
+            });
         } else {
             self.text = new_text;
         }
@@ -148,7 +160,7 @@ impl App {
         self.scroll.set_text(text_w);
         unsafe {
             // The scroll timer also drives an in-flight quote crossfade.
-            if self.scroll.scrolling() || self.transition_start != 0 {
+            if self.scroll.scrolling() || self.transition.is_some() {
                 SetTimer(
                     self.hwnd,
                     SCROLL_TIMER,
@@ -167,22 +179,21 @@ impl App {
     fn present(&mut self) {
         let x = self.scroll.x();
         let alpha = self.scroll.alpha();
-        // Crossfade envelope: the outgoing layer runs 1 → 0, the incoming
-        // layer 0 → 1, over TRANSITION_MS.
+        // Crossfade envelope: the outgoing layer runs prev_alpha → 0, the
+        // incoming layer 0 → alpha, over TRANSITION_MS.
         let mut t = 1.0_f32;
-        if self.transition_start != 0 {
+        if let Some(tr) = &self.transition {
             let now = unsafe { GetTickCount64() };
-            t = ((now - self.transition_start) as f32 / TRANSITION_MS as f32).min(1.0);
-            if t >= 1.0 {
-                self.transition_start = 0;
-                self.prev_text = None;
-            }
+            t = crossfade_alpha(now - tr.start);
+        }
+        if t >= 1.0 {
+            self.transition = None;
         }
         self.last_presented_x = x;
         self.last_presented_alpha = (alpha * t * 255.0).round() as i32;
-        match &self.prev_text {
-            Some(prev) => self.surface.draw(&[
-                (prev.as_str(), self.prev_x, 1.0 - t),
+        match &self.transition {
+            Some(tr) => self.surface.draw(&[
+                (tr.prev_text.as_str(), tr.prev_x, tr.prev_alpha * (1.0 - t)),
                 (self.text.as_str(), x, alpha * t),
             ]),
             None => self.surface.draw(&[(self.text.as_str(), x, alpha * t)]),
@@ -230,14 +241,14 @@ impl App {
         self.last_tick_ms = now;
         self.scroll.tick(dt);
         let alpha_q = (self.scroll.alpha() * 255.0).round() as i32;
-        if self.transition_start != 0
+        if self.transition.is_some()
             || self.scroll.x() != self.last_presented_x
             || alpha_q != self.last_presented_alpha
         {
             self.present();
         }
         // Nothing left to animate: stop the 64 Hz cadence.
-        if !self.scroll.scrolling() && self.transition_start == 0 {
+        if !self.scroll.scrolling() && self.transition.is_none() {
             unsafe { KillTimer(self.hwnd, SCROLL_TIMER) };
         }
     }
@@ -273,9 +284,8 @@ impl App {
         // The scroller caches view width and speed in px — both are
         // DPI-dependent, so rebuild it (refresh() re-measures the text).
         self.scroll = Scroll::new(self.win_w, 0, SCROLL_SPEED_LOGICAL * dpi as f32 / 96.0);
-        // An in-flight crossfade's cached x belongs to the old geometry.
-        self.prev_text = None;
-        self.transition_start = 0;
+        // An in-flight crossfade's cached geometry belongs to the old DPI.
+        self.transition = None;
         unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -296,6 +306,11 @@ impl App {
             .unwrap_or(std::path::Path::new("."));
         dir.join(quotes::FILE_NAME).to_string_lossy().into_owned()
     }
+}
+
+/// Crossfade envelope: 0 → 1 linearly over TRANSITION_MS, clamped.
+fn crossfade_alpha(elapsed_ms: u64) -> f32 {
+    (elapsed_ms as f32 / TRANSITION_MS as f32).min(1.0)
 }
 
 /// Logical px @ 96 DPI → physical px at `dpi`.
@@ -678,6 +693,14 @@ mod tests {
             parse_cli(&["--foo".to_string(), "bar".to_string()]),
             Cli { quiet: false }
         );
+    }
+
+    #[test]
+    fn crossfade_alpha_ramps_linearly_and_clamps() {
+        assert_eq!(crossfade_alpha(0), 0.0);
+        assert_eq!(crossfade_alpha(TRANSITION_MS / 2), 0.5);
+        assert_eq!(crossfade_alpha(TRANSITION_MS), 1.0);
+        assert_eq!(crossfade_alpha(u64::MAX), 1.0);
     }
 
     #[test]
