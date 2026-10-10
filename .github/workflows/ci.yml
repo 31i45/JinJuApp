@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  build:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Enforce binary size red line (< 500 KB)
+        shell: pwsh
+        run: |
+          $size = (Get-Item 'target\release\JinJuApp.exe').Length
+          Write-Output "JinJuApp.exe = $size bytes ($([math]::Round($size/1KB,1)) KB)"
+          if ($size -ge 500KB) { throw "binary exceeds the 500 KB red line" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JinJuApp-${{ github.sha }}
+          path: target/release/JinJuApp.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: JinJuApp-${{ github.sha }}
+      - name: Checksums
+        run: sha256sum JinJuApp.exe > SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" JinJuApp.exe SHA256SUMS --title "JinJuApp ${{ github.ref_name }}" --generate-notes
