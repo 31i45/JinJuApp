@@ -171,12 +171,17 @@ impl Surface {
                     right: x + self.width,
                     bottom: self.height,
                 };
+                // DT_NOCLIP is essential: DrawTextW by default clips to the
+                // layout rect, and this rect slides with the text origin —
+                // the tail would never render past (x + width). With
+                // DT_NOCLIP, GDI still clips at the DIB surface, which is
+                // exactly the marquee's window edge.
                 DrawTextW(
                     self.hdc,
                     wide.as_mut_ptr(),
                     wide.len() as i32,
                     &mut target,
-                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_NOCLIP,
                 );
             }
         }
@@ -272,5 +277,62 @@ mod tests {
         assert_eq!(scale(255, 0), 0);
         // 30*217/255 = 25.53 → 26
         assert_eq!(scale(30, 217), 26);
+    }
+
+    /// Regression: DrawTextW without DT_NOCLIP clips to the layout rect,
+    /// which slides with the text origin during the marquee — the tail of
+    /// a long quote never rendered (user-visible as ~29 CJK chars max).
+    /// A long text drawn at a negative origin must still put ink at the
+    /// strip's right edge, where the tail arrives during the slide.
+    #[test]
+    fn draw_renders_tail_when_origin_is_negative() {
+        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        // ~120 ASCII chars ≈ 800 px wide at 13 pt — far wider than 500.
+        let text = "The quick brown fox jumps over the lazy dog and keeps \
+                    running far beyond the edge of the strip ABCDEFGHIJKL \
+                    0123456789 abcdefghijklmnopqrstuvwxyz";
+        assert!(s.measure(text) > 700, "test text must overflow the strip");
+        s.draw(text, -300);
+        // Any ink (alpha > 0) in the rightmost 100 px column band.
+        let (w, h) = (s.width as usize, s.height as usize);
+        let buf = s.bits_mut();
+        let mut ink = 0;
+        for y in 0..h {
+            for xx in (w - 100)..w {
+                if buf[(y * w + xx) * 4 + 3] > 0 {
+                    ink += 1;
+                }
+            }
+        }
+        assert!(ink > 0, "tail must render at the right edge (DT_NOCLIP)");
+    }
+
+    /// The user-reported quote must overflow the 470 px resting width so
+    /// the marquee engages at all (guards CJK width measurement).
+    #[test]
+    fn measure_cjk_long_quote_overflows_strip() {
+        let s = Surface::new(500, 36, 96).expect("GDI surface");
+        let q = "翻山越岭只为一场遇见，全力以赴只为一次改变。答案就在眼泪里，\
+                 也凝结在汗水中、感官和心灵。";
+        let w = s.measure(q);
+        assert!(w > 470, "44-char CJK quote must overflow 470 px (got {w})");
+    }
+
+    /// The symmetric half: with the origin at rest the head is visible.
+    #[test]
+    fn draw_renders_head_at_rest() {
+        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        s.draw("金句", 15);
+        let (w, h) = (s.width as usize, s.height as usize);
+        let buf = s.bits_mut();
+        let mut ink = 0;
+        for y in 0..h {
+            for xx in 0..100 {
+                if buf[(y * w + xx) * 4 + 3] > 0 {
+                    ink += 1;
+                }
+            }
+        }
+        assert!(ink > 0, "head must render at the left edge");
     }
 }

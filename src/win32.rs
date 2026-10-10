@@ -251,6 +251,7 @@ pub const SW_SHOWNOACTIVATE: i32 = 4;
 pub const HWND_TOPMOST: HWND = core::ptr::without_provenance_mut(usize::MAX);
 pub const SWP_NOSIZE: u32 = 0x0001;
 pub const SWP_NOMOVE: u32 = 0x0002;
+pub const SWP_NOACTIVATE: u32 = 0x0010;
 pub const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 
 // layered window
@@ -266,6 +267,7 @@ pub const DT_SINGLELINE: u32 = 0x20;
 pub const DT_VCENTER: u32 = 0x04;
 pub const DT_NOPREFIX: u32 = 0x0800;
 pub const DT_CALCRECT: u32 = 0x0400;
+pub const DT_NOCLIP: u32 = 0x0100;
 pub const BLACK_BRUSH: i32 = 4;
 
 // notifications area

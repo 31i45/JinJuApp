@@ -33,7 +33,16 @@ const QUOTE_INTERVAL_MS: u32 = 3 * 60 * 1000; // every 3 minutes, as before
 const QUOTE_TIMER: usize = 1;
 const SCROLL_TIMER: usize = 2;
 const SCROLL_TICK_MS: u32 = 50;
-const SCROLL_SPEED_PX_PER_S: f32 = 30.0;
+/// Scroll speed in logical px per second @ 96 DPI (scaled to the DPI at
+/// which the surface renders).
+const SCROLL_SPEED_LOGICAL: f32 = 45.0;
+const Z_ORDER_TIMER: usize = 3;
+/// The strip shares the taskbar band with explorer, which re-asserts its
+/// own topmost status whenever the taskbar is activated (icon clicks,
+/// new buttons, flyouts). Diagnostics showed a demoted strip stayed
+/// hidden until the next quote change (minutes). Re-assert at this
+/// cadence so any cover is bounded to one interval.
+const Z_ORDER_INTERVAL_MS: u32 = 500;
 
 /// Message id the shell broadcasts when the taskbar is (re)created.
 static TASKBAR_CREATED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -80,13 +89,14 @@ impl App {
         let win_h = scale_pt(WINDOW_H, dpi);
         let surface = Surface::new(win_w, win_h, dpi)?;
         let bag = Bag::new(quotes.lines().len());
+        let speed_px_per_s = SCROLL_SPEED_LOGICAL * dpi as f32 / 96.0;
         Some(App {
             hwnd,
             dpi,
             win_w,
             win_h,
             surface,
-            scroll: Scroll::new(win_w, 0, SCROLL_SPEED_PX_PER_S),
+            scroll: Scroll::new(win_w, 0, speed_px_per_s),
             text: String::new(),
             quotes,
             bag,
@@ -191,6 +201,9 @@ impl App {
         self.dpi = dpi;
         self.win_w = scale_pt(WINDOW_W, dpi);
         self.win_h = scale_pt(WINDOW_H, dpi);
+        // The scroller caches view width and speed in px — both are
+        // DPI-dependent, so rebuild it (refresh() re-measures the text).
+        self.scroll = Scroll::new(self.win_w, 0, SCROLL_SPEED_LOGICAL * dpi as f32 / 96.0);
         unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -199,7 +212,7 @@ impl App {
                 suggested.top,
                 suggested.right - suggested.left,
                 suggested.bottom - suggested.top,
-                0, // size already correct; position follows the suggestion
+                SWP_NOACTIVATE, // size already correct; follow the suggestion
             );
         }
         self.refresh();
@@ -314,10 +327,22 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                         if IsWindowVisible(hwnd) == 0 {
                             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                         }
-                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                         app.next_quote();
                     }
                     SCROLL_TIMER => app.tick_scroll(),
+                    Z_ORDER_TIMER => {
+                        // NOACTIVATE: never steal focus. No SHOWWINDOW: never
+                        // fight Win+D (visibility is owned by the quote tick).
+                        SetWindowPos(
+                            hwnd,
+                            HWND_TOPMOST,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        );
+                    }
                     _ => {}
                 }
                 0
@@ -527,6 +552,12 @@ fn main() {
             app.reposition();
             app.next_quote();
             SetTimer(hwnd, QUOTE_TIMER, QUOTE_INTERVAL_MS, core::ptr::null_mut());
+            SetTimer(
+                hwnd,
+                Z_ORDER_TIMER,
+                Z_ORDER_INTERVAL_MS,
+                core::ptr::null_mut(),
+            );
         }
 
         if !tray::add(hwnd) {
