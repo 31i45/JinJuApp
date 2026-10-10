@@ -308,14 +308,28 @@ mod tests {
     }
 
     /// The user-reported quote must overflow the 470 px resting width so
-    /// the marquee engages at all (guards CJK width measurement).
+    /// the marquee engages at all. Beyond that behavioral check, the
+    /// full-width property is asserted *relatively* to an equal-count
+    /// ASCII baseline (CJK ≈ 2× half-width; the ratio must exceed 3/2),
+    /// so a collapsed or half-width CJK measurement fails without the
+    /// test hard-coding any one font's pixel metrics.
     #[test]
     fn measure_cjk_long_quote_overflows_strip() {
         let s = Surface::new(500, 36, 96).expect("GDI surface");
         let q = "翻山越岭只为一场遇见，全力以赴只为一次改变。答案就在眼泪里，\
                  也凝结在汗水中、感官和心灵。";
-        let w = s.measure(q);
-        assert!(w > 470, "44-char CJK quote must overflow 470 px (got {w})");
+        let ascii = "abcdefghijklmnopqrstuvwxyz0123456789abcdefgh";
+        assert_eq!(q.chars().count(), ascii.chars().count(), "equal baselines");
+        let (cjk, base) = (s.measure(q), s.measure(ascii));
+        eprintln!("CJK {cjk} px vs ASCII {base} px (44 chars each)");
+        assert!(
+            cjk * 2 > base * 3,
+            "CJK must measure well beyond the ASCII baseline ({cjk} vs {base})"
+        );
+        assert!(
+            cjk > 470,
+            "44-char CJK quote must overflow 470 px (got {cjk})"
+        );
     }
 
     /// The symmetric half: with the origin at rest the head is visible.

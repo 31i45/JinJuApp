@@ -527,3 +527,14 @@ unsafe extern "system" {
     pub fn RegDeleteValueW(hKey: HKEY, lpValueName: *const u16) -> i32;
     pub fn RegCloseKey(hKey: HKEY) -> i32;
 }
+
+// ---------------------------------------------------------------------------
+// dwmapi
+// ---------------------------------------------------------------------------
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    /// Blocks until the next DWM composition frame — used to align
+    /// layered-window updates with the compositor's frame boundary.
+    pub fn DwmFlush() -> i32;
+}

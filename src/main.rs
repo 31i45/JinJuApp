@@ -3,11 +3,12 @@
 //! Pure-Win32 rewrite of the original PyQt application: no bootloader, no
 //! packer, no framework — a native binary that renders one line of text
 //! through a per-pixel-alpha layered window. All decision logic lives in
-//! pure, unit-tested modules (`quotes`, `layout`, `render`); this file is
-//! the thin host that wires them to the message loop.
+//! pure, unit-tested modules (`quotes`, `geometry`, `layout`, `render`);
+//! this file is the thin host that wires them to the message loop.
 
 #![windows_subsystem = "windows"]
 
+mod geometry;
 mod layout;
 mod quotes;
 mod render;
@@ -15,7 +16,8 @@ mod startup;
 mod tray;
 mod win32;
 
-use layout::{Edge, Rect, Scroll};
+use geometry::{Edge, Rect};
+use layout::Scroll;
 use quotes::{Bag, Rng, Source};
 use render::Surface;
 use win32::*;
@@ -141,6 +143,11 @@ impl App {
         self.last_presented_x = x;
         self.surface.draw(&self.text, x);
         unsafe {
+            // Frame pacing: submit on the compositor's boundary instead of
+            // mid-scan, so marquee frames don't land at arbitrary offsets
+            // within the DWM refresh. Best-effort — on failure we simply
+            // keep the previous pacing.
+            let _ = DwmFlush();
             let size = POINT {
                 x: self.win_w,
                 y: self.win_h,
@@ -187,7 +194,7 @@ impl App {
         let Some((taskbar, edge, monitor)) = desktop_geometry() else {
             return;
         };
-        let r = layout::place(
+        let r = geometry::place(
             &taskbar,
             &monitor,
             edge,
