@@ -1,6 +1,6 @@
 [package]
 name = "JinJuApp"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2024"
 description = "A taskbar-side quote ticker for Windows"
 license = "MIT"

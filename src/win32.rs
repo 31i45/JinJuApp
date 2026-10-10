@@ -314,8 +314,6 @@ pub const REG_SZ: u32 = 1;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    pub fn GetDC(hWnd: HWND) -> HDC;
-    pub fn ReleaseDC(hWnd: HWND, hdc: HDC) -> i32;
     pub fn CreateMutexW(
         lpMutexAttributes: *mut c_void,
         bInitialOwner: BOOL,
@@ -334,6 +332,8 @@ unsafe extern "system" {
 
 #[link(name = "user32")]
 unsafe extern "system" {
+    pub fn GetDC(hWnd: HWND) -> HDC;
+    pub fn ReleaseDC(hWnd: HWND, hdc: HDC) -> i32;
     pub fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) -> ATOM;
     pub fn CreateWindowExW(
         dwExStyle: u32,
