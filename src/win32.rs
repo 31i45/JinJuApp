@@ -299,8 +299,11 @@ pub const IMAGE_ICON_APP: *const u16 = core::ptr::without_provenance(1); // winr
 
 // registry
 pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001usize as HKEY;
+// KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | STANDARD_RIGHTS_READ
 pub const KEY_READ: u32 = 0x0002_0019;
-pub const KEY_SET_VALUE: u32 = 0x2002;
+// KEY_SET_VALUE — and nothing else: undefined access bits (e.g. 0x2000)
+// fail the DACL check with ERROR_ACCESS_DENIED.
+pub const KEY_SET_VALUE: u32 = 0x0002;
 pub const REG_SZ: u32 = 1;
 
 // ---------------------------------------------------------------------------

@@ -101,11 +101,18 @@ impl Scroll {
     }
 }
 
-/// Place the window on the desktop strip adjacent to the taskbar.
+/// Gap between the strip and the screen's bottom edge (keeps glyph
+/// descenders off the very last pixel row).
+const BOTTOM_INSET: i32 = 2;
+
+/// Place the window relative to the taskbar.
 ///
-/// `monitor` is the full monitor rect (not the work area) so the math is
-/// independent of where the taskbar is docked; the window always lands on
-/// the desktop side of the taskbar, never overlapping it.
+/// Bottom-docked taskbar (the default): the strip anchors to the
+/// screen's bottom-left corner — inside the taskbar band, exactly where
+/// v1 drew it. It reads as taskbar text, and it stays put when the bar
+/// auto-hides. Top/side-docked taskbars: the strip goes on the desktop
+/// side of the bar (horizontal text cannot live inside a vertical one),
+/// never overlapping it.
 pub fn place(
     taskbar: &Rect,
     monitor: &Rect,
@@ -117,7 +124,7 @@ pub fn place(
     match edge {
         Edge::Bottom => Rect::new(
             monitor.left + margin,
-            taskbar.top - win_h - margin,
+            monitor.bottom - win_h - BOTTOM_INSET,
             win_w,
             win_h,
         ),
@@ -217,7 +224,10 @@ mod tests {
     };
 
     #[test]
-    fn places_above_bottom_taskbar() {
+    fn bottom_taskbar_strip_sits_in_screen_corner_inside_the_bar() {
+        // v1 parity: for a bottom-docked taskbar the strip anchors to the
+        // screen corner (inside the taskbar band), not to the bar's
+        // desktop side.
         let tb = Rect {
             left: 0,
             top: 1032,
@@ -225,8 +235,26 @@ mod tests {
             bottom: 1080,
         };
         let r = place(&tb, &M, Edge::Bottom, 500, 45, 10);
-        assert_eq!(r, Rect::new(10, 1032 - 45 - 10, 500, 45));
-        assert!(r.bottom <= tb.top, "must not overlap the taskbar");
+        assert_eq!(r, Rect::new(10, 1080 - 45 - BOTTOM_INSET, 500, 45));
+        assert!(
+            r.bottom > tb.top && r.bottom <= M.bottom,
+            "strip must be inside the taskbar band"
+        );
+    }
+
+    #[test]
+    fn bottom_taskbar_strip_survives_autohide() {
+        // With an auto-hidden taskbar only a sliver is on screen; the
+        // strip, anchored to the screen corner, remains fully visible.
+        let tb = Rect {
+            left: 0,
+            top: 1072,
+            right: 1920,
+            bottom: 1080,
+        };
+        let r = place(&tb, &M, Edge::Bottom, 500, 45, 10);
+        assert_eq!(r.bottom, M.bottom - BOTTOM_INSET);
+        assert!(r.top < tb.top, "strip rides above the hidden sliver");
     }
 
     #[test]
