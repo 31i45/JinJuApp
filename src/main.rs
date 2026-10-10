@@ -39,6 +39,9 @@ const SCROLL_TICK_MS: u32 = 15;
 /// which the surface renders).
 const SCROLL_SPEED_LOGICAL: f32 = 45.0;
 const Z_ORDER_TIMER: usize = 3;
+/// Quote-change crossfade duration: the outgoing line fades out where it
+/// stands while the incoming line fades in at rest.
+const TRANSITION_MS: u64 = 400;
 /// The strip shares the taskbar band with explorer, which re-asserts its
 /// own topmost status whenever the taskbar is activated (icon clicks,
 /// new buttons, flyouts). Diagnostics showed a demoted strip stayed
@@ -83,6 +86,14 @@ struct App {
     rng: Rng,
     last_tick_ms: u64,
     last_presented_x: i32,
+    last_presented_alpha: i32,
+    /// Previous quote, kept on screen for a TRANSITION_MS crossfade.
+    prev_text: Option<String>,
+    /// X at which the previous quote was last shown (captured before the
+    /// scroller resets for the new text).
+    prev_x: i32,
+    /// GetTickCount64 at the quote change; 0 = no crossfade in flight.
+    transition_start: u64,
     exe_path: String,
 }
 
@@ -106,6 +117,10 @@ impl App {
             rng: Rng::from_entropy(),
             last_tick_ms: 0,
             last_presented_x: i32::MIN,
+            last_presented_alpha: -1,
+            prev_text: None,
+            prev_x: 0,
+            transition_start: 0,
             exe_path,
         })
     }
@@ -113,7 +128,17 @@ impl App {
     /// Pick the next quote, adapt the scroller, present.
     fn next_quote(&mut self) {
         let i = self.bag.next(&mut self.rng);
-        self.text = self.quotes.lines()[i].clone();
+        let new_text = self.quotes.lines()[i].clone();
+        // Crossfade: keep the outgoing line at its current spot for one
+        // TRANSITION_MS envelope while the new line fades in at rest.
+        // prev_x must be captured before refresh() resets the scroller.
+        if !self.text.is_empty() && self.text != new_text {
+            self.prev_x = self.scroll.x();
+            self.prev_text = Some(std::mem::replace(&mut self.text, new_text));
+            self.transition_start = unsafe { GetTickCount64() };
+        } else {
+            self.text = new_text;
+        }
         self.refresh();
     }
 
@@ -122,7 +147,8 @@ impl App {
         let text_w = self.surface.measure(&self.text);
         self.scroll.set_text(text_w);
         unsafe {
-            if self.scroll.scrolling() {
+            // The scroll timer also drives an in-flight quote crossfade.
+            if self.scroll.scrolling() || self.transition_start != 0 {
                 SetTimer(
                     self.hwnd,
                     SCROLL_TIMER,
@@ -140,8 +166,27 @@ impl App {
     /// Composite the text at the current scroll offset onto the screen.
     fn present(&mut self) {
         let x = self.scroll.x();
+        let alpha = self.scroll.alpha();
+        // Crossfade envelope: the outgoing layer runs 1 → 0, the incoming
+        // layer 0 → 1, over TRANSITION_MS.
+        let mut t = 1.0_f32;
+        if self.transition_start != 0 {
+            let now = unsafe { GetTickCount64() };
+            t = ((now - self.transition_start) as f32 / TRANSITION_MS as f32).min(1.0);
+            if t >= 1.0 {
+                self.transition_start = 0;
+                self.prev_text = None;
+            }
+        }
         self.last_presented_x = x;
-        self.surface.draw(&self.text, x);
+        self.last_presented_alpha = (alpha * t * 255.0).round() as i32;
+        match &self.prev_text {
+            Some(prev) => self.surface.draw(&[
+                (prev.as_str(), self.prev_x, 1.0 - t),
+                (self.text.as_str(), x, alpha * t),
+            ]),
+            None => self.surface.draw(&[(self.text.as_str(), x, alpha * t)]),
+        }
         unsafe {
             // Frame pacing: submit on the compositor's boundary instead of
             // mid-scan, so marquee frames don't land at arbitrary offsets
@@ -184,8 +229,16 @@ impl App {
         let dt = (now - self.last_tick_ms).min(250) as f32;
         self.last_tick_ms = now;
         self.scroll.tick(dt);
-        if self.scroll.x() != self.last_presented_x {
+        let alpha_q = (self.scroll.alpha() * 255.0).round() as i32;
+        if self.transition_start != 0
+            || self.scroll.x() != self.last_presented_x
+            || alpha_q != self.last_presented_alpha
+        {
             self.present();
+        }
+        // Nothing left to animate: stop the 64 Hz cadence.
+        if !self.scroll.scrolling() && self.transition_start == 0 {
+            unsafe { KillTimer(self.hwnd, SCROLL_TIMER) };
         }
     }
 
@@ -220,6 +273,9 @@ impl App {
         // The scroller caches view width and speed in px — both are
         // DPI-dependent, so rebuild it (refresh() re-measures the text).
         self.scroll = Scroll::new(self.win_w, 0, SCROLL_SPEED_LOGICAL * dpi as f32 / 96.0);
+        // An in-flight crossfade's cached x belongs to the old geometry.
+        self.prev_text = None;
+        self.transition_start = 0;
         unsafe {
             SetWindowPos(
                 self.hwnd,

@@ -1,11 +1,12 @@
 //! Text rendering into a per-pixel-alpha ARGB surface.
 //!
-//! Pipeline: GDI draws the text **white on black** into a 32-bpp top-down
-//! DIB (the red channel then carries per-pixel coverage — grayscale
-//! antialiasing, correct on alpha surfaces where ClearType is not), and
-//! [`premultiply`] converts that mask into the final premultiplied ARGB
-//! pixels that `UpdateLayeredWindow` expects. The conversion is a pure
-//! function; the GDI half is a thin resource-owning host.
+//! Pipeline: GDI draws each text layer **white on black** into a 32-bpp
+//! top-down DIB (the red channel then carries per-pixel coverage —
+//! grayscale antialiasing, correct on alpha surfaces where ClearType is
+//! not), and [`accumulate_layer`] blends the mask, scaled by the layer's
+//! opacity, into a premultiplied ARGB frame that `UpdateLayeredWindow`
+//! expects. Two layers crossfade by simple addition. The blending is a
+//! pure function; the GDI half is a thin resource-owning host.
 
 use crate::win32::*;
 
@@ -21,19 +22,27 @@ fn scale(c: u8, a: u8) -> u8 {
     ((u32::from(c) * u32::from(a) + 127) / 255) as u8
 }
 
-/// In-place: grayscale mask (white text on black) → premultiplied ARGB.
+/// Accumulate one coverage-mask layer into the premultiplied ARGB frame.
 ///
-/// `buf` is BGRA, row-major, top-down; `chunks_exact` skips any trailing
-/// bytes. Pure: no GDI, no globals.
-pub fn premultiply(buf: &mut [u8], color: (u8, u8, u8), max_alpha: u8) {
-    let (pixels, _) = buf.as_chunks_mut::<4>();
-    for px in pixels {
-        let coverage = px[2]; // red channel carries coverage
-        let a = scale(max_alpha, coverage);
-        px[0] = scale(color.2, a);
-        px[1] = scale(color.1, a);
-        px[2] = scale(color.0, a);
-        px[3] = a;
+/// `mask` and `frame` are BGRA, row-major, top-down; the mask's red
+/// channel carries coverage. `alpha_q` is the layer opacity (0-255).
+/// Additive with saturation: two crossfading layers simply sum. Pure:
+/// no GDI, no globals.
+pub fn accumulate_layer(
+    mask: &[u8],
+    frame: &mut [u8],
+    color: (u8, u8, u8),
+    max_alpha: u8,
+    alpha_q: u8,
+) {
+    let (mp, _) = mask.as_chunks::<4>();
+    let (fp, _) = frame.as_chunks_mut::<4>();
+    for (m, f) in mp.iter().zip(fp.iter_mut()) {
+        let a = scale(scale(max_alpha, m[2]), alpha_q);
+        f[0] = f[0].saturating_add(scale(color.2, a));
+        f[1] = f[1].saturating_add(scale(color.1, a));
+        f[2] = f[2].saturating_add(scale(color.0, a));
+        f[3] = f[3].saturating_add(a);
     }
 }
 
@@ -71,6 +80,7 @@ pub struct Surface {
     hdc: HDC,
     hbmp: HBITMAP,
     bits: *mut u8,
+    frame: Vec<u8>, // premultiplied accumulation buffer (w*h*4)
     font: HFONT,
     old_bmp: HGDIOBJ,
     old_font: HGDIOBJ,
@@ -122,6 +132,7 @@ impl Surface {
                 hdc,
                 hbmp,
                 bits: bits as *mut u8,
+                frame: vec![0; (width as usize) * (height as usize) * 4],
                 font,
                 old_bmp,
                 old_font,
@@ -150,21 +161,29 @@ impl Surface {
         rc.right.max(0)
     }
 
-    /// Draw `text` at x-offset `x`, producing the final ARGB pixels in
-    /// [`bits`]. White-on-black into the DIB, then premultiply.
-    pub fn draw(&mut self, text: &str, x: i32) {
-        unsafe {
-            let mut rc = RECT {
-                left: 0,
-                top: 0,
-                right: self.width,
-                bottom: self.height,
-            };
-            FillRect(self.hdc, &mut rc, GetStockObject(BLACK_BRUSH));
-            SetBkColor(self.hdc, rgb(0, 0, 0));
-            SetTextColor(self.hdc, rgb(255, 255, 255));
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            if !wide.is_empty() {
+    /// Draw text layers `(text, x, alpha)`, producing the final ARGB
+    /// pixels in [`bits`](Self::bits_mut). Each layer is rasterized as a
+    /// coverage mask into the DIB, then accumulated into the frame scaled
+    /// by its alpha — one primitive serves both the marquee's fade-reset
+    /// (single layer, alpha envelope) and the quote crossfade (two
+    /// layers). The frame is copied back into the DIB for ULW.
+    pub fn draw(&mut self, layers: &[(&str, i32, f32)]) {
+        self.frame.fill(0);
+        for &(text, x, alpha) in layers {
+            if text.is_empty() || alpha <= 0.0 {
+                continue;
+            }
+            unsafe {
+                let mut rc = RECT {
+                    left: 0,
+                    top: 0,
+                    right: self.width,
+                    bottom: self.height,
+                };
+                FillRect(self.hdc, &mut rc, GetStockObject(BLACK_BRUSH));
+                SetBkColor(self.hdc, rgb(0, 0, 0));
+                SetTextColor(self.hdc, rgb(255, 255, 255));
+                let mut wide: Vec<u16> = text.encode_utf16().collect();
                 let mut target = RECT {
                     left: x,
                     top: 0,
@@ -184,11 +203,24 @@ impl Surface {
                     DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_NOCLIP,
                 );
             }
+            let alpha_q = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let len = (self.width as usize) * (self.height as usize) * 4;
+            // `bits` is a raw pointer field — reading it holds no borrow,
+            // so the mask slice can coexist with `&mut self.frame`.
+            let mask = unsafe { core::slice::from_raw_parts(self.bits, len) };
+            accumulate_layer(mask, &mut self.frame, COLOR, MAX_ALPHA, alpha_q);
         }
-        premultiply(self.bits_mut(), COLOR, MAX_ALPHA);
+        // Copy the composed frame back into the DIB for ULW. Raw-pointer
+        // copy: `bits_mut()` would take `&mut self` and clash with the
+        // `&self.frame` borrow.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.frame.as_ptr(), self.bits, self.frame.len());
+        }
     }
 
-    /// The DIB pixel buffer, `w*h*4` bytes, BGRA top-down.
+    /// The DIB pixel buffer, `w*h*4` bytes, BGRA top-down. Test-only:
+    /// production code writes through the raw `bits` pointer (borrow-free).
+    #[cfg(test)]
     pub fn bits_mut(&mut self) -> &mut [u8] {
         let len = (self.width as usize) * (self.height as usize) * 4;
         unsafe { core::slice::from_raw_parts_mut(self.bits, len) }
@@ -225,10 +257,10 @@ mod tests {
 
     #[test]
     fn background_is_fully_transparent() {
-        let mut buf = [0u8, 0, 0, 0xFF, 0, 0, 0, 0xFF];
-        premultiply(&mut buf, COLOR, MAX_ALPHA);
-        assert_eq!(px(&buf[..4]), [0, 0, 0, 0]);
-        assert_eq!(px(&buf[4..]), [0, 0, 0, 0]);
+        let mask = [0u8, 0, 0, 0xFF, 0, 0, 0, 0xFF];
+        let mut frame = [0u8; 8];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        assert_eq!(frame, [0u8; 8]);
     }
 
     #[test]
@@ -236,38 +268,75 @@ mod tests {
         // White solid: coverage 255. Premultiplied: rgb = color * alpha,
         // so 30 * 217/255 = 26 — the *displayed* color stays 30/255 at
         // 85% opacity, which is exactly what premultiplication means.
-        let mut buf = [0u8, 0, 255, 0];
-        premultiply(&mut buf, COLOR, MAX_ALPHA);
+        let mask = [0u8, 0, 255, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
         let expected = [
-            scale(COLOR.0, MAX_ALPHA),
-            scale(COLOR.1, MAX_ALPHA),
             scale(COLOR.2, MAX_ALPHA),
+            scale(COLOR.1, MAX_ALPHA),
+            scale(COLOR.0, MAX_ALPHA),
             MAX_ALPHA,
         ];
-        assert_eq!(px(&buf), expected);
+        assert_eq!(px(&frame), expected);
         assert_eq!(expected[0], 26); // 30 * 217 / 255, rounded
     }
 
     #[test]
     fn half_coverage_blends_by_coverage() {
-        let mut buf = [0u8, 0, 128, 0];
-        premultiply(&mut buf, COLOR, MAX_ALPHA);
+        let mask = [0u8, 0, 128, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
         let a = scale(217, 128);
-        assert_eq!(px(&buf), [scale(30, a), scale(30, a), scale(30, a), a]);
+        assert_eq!(px(&frame), [scale(30, a), scale(30, a), scale(30, a), a]);
     }
 
     #[test]
     fn full_opacity_max_alpha_is_255() {
-        let mut buf = [0u8, 0, 255, 0];
-        premultiply(&mut buf, (10, 20, 30), 255);
-        assert_eq!(px(&buf), [30, 20, 10, 255]);
+        let mask = [0u8, 0, 255, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, (10, 20, 30), 255, 255);
+        assert_eq!(px(&frame), [30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn layer_alpha_scales_opacity() {
+        let mask = [0u8, 0, 255, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 128);
+        let a = scale(MAX_ALPHA, 128);
+        assert_eq!(px(&frame), [scale(30, a), scale(30, a), scale(30, a), a]);
+    }
+
+    #[test]
+    fn zero_alpha_layer_is_invisible() {
+        let mask = [0u8, 0, 255, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 0);
+        assert_eq!(frame, [0u8; 4]);
+    }
+
+    #[test]
+    fn two_layers_accumulate_with_saturation() {
+        let mask = [0u8, 0, 255, 0];
+        let mut frame = [0u8; 4];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let once = px(&frame);
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let twice = px(&frame);
+        assert!(
+            twice[3] > once[3],
+            "a second layer adds alpha ({} -> {})",
+            once[3],
+            twice[3]
+        );
     }
 
     #[test]
     fn trailing_partial_chunk_is_untouched() {
-        let mut buf = [0u8, 0, 255, 0, 9, 9];
-        premultiply(&mut buf, COLOR, MAX_ALPHA);
-        assert_eq!(&buf[4..], &[9, 9]);
+        let mask = [0u8, 0, 255, 0, 9, 9];
+        let mut frame = [0u8, 0, 0, 0, 7, 7];
+        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        assert_eq!(&frame[4..], &[7, 7]);
     }
 
     #[test]
@@ -292,7 +361,7 @@ mod tests {
                     running far beyond the edge of the strip ABCDEFGHIJKL \
                     0123456789 abcdefghijklmnopqrstuvwxyz";
         assert!(s.measure(text) > 700, "test text must overflow the strip");
-        s.draw(text, -300);
+        s.draw(&[(text, -300, 1.0)]);
         // Any ink (alpha > 0) in the rightmost 100 px column band.
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
@@ -336,7 +405,7 @@ mod tests {
     #[test]
     fn draw_renders_head_at_rest() {
         let mut s = Surface::new(500, 36, 96).expect("GDI surface");
-        s.draw("金句", 15);
+        s.draw(&[("金句", 15, 1.0)]);
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
         let mut ink = 0;
