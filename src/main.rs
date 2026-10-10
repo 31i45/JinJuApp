@@ -32,7 +32,7 @@ const PLACE_MARGIN: i32 = 10;
 const QUOTE_INTERVAL_MS: u32 = 3 * 60 * 1000; // every 3 minutes, as before
 const QUOTE_TIMER: usize = 1;
 const SCROLL_TIMER: usize = 2;
-const SCROLL_TICK_MS: u32 = 50;
+const SCROLL_TICK_MS: u32 = 15;
 /// Scroll speed in logical px per second @ 96 DPI (scaled to the DPI at
 /// which the surface renders).
 const SCROLL_SPEED_LOGICAL: f32 = 45.0;
@@ -80,6 +80,7 @@ struct App {
     bag: Bag,
     rng: Rng,
     last_tick_ms: u64,
+    last_presented_x: i32,
     exe_path: String,
 }
 
@@ -102,6 +103,7 @@ impl App {
             bag,
             rng: Rng::from_entropy(),
             last_tick_ms: 0,
+            last_presented_x: i32::MIN,
             exe_path,
         })
     }
@@ -136,6 +138,7 @@ impl App {
     /// Composite the text at the current scroll offset onto the screen.
     fn present(&mut self) {
         let x = self.scroll.x();
+        self.last_presented_x = x;
         self.surface.draw(&self.text, x);
         unsafe {
             let size = POINT {
@@ -164,13 +167,19 @@ impl App {
     }
 
     /// Advance the marquee by the time since the last tick.
+    ///
+    /// The 15 ms cadence (~64 Hz, near display refresh) keeps the per-frame
+    /// step under 1 px, so rounding produces a steady 0/1 px pattern instead
+    /// of the 2/3 px alternation that reads as stutter at 20 Hz.
     fn tick_scroll(&mut self) {
         let now = unsafe { GetTickCount64() };
         // Clamp: after a sleep/suspend the delta is meaningless.
         let dt = (now - self.last_tick_ms).min(250) as f32;
         self.last_tick_ms = now;
         self.scroll.tick(dt);
-        self.present();
+        if self.scroll.x() != self.last_presented_x {
+            self.present();
+        }
     }
 
     /// Move to the strip adjacent to the taskbar (any docked edge).
