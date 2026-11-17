@@ -17,25 +17,58 @@ pub const MAX_ALPHA: u8 = 217; // 0.85 * 255
 /// Font size in points (the original app used 13 pt).
 const FONT_PT: i32 = 13;
 
-/// Query the current system button-text color as an (R, G, B) triple.
+/// Query the current system theme and return an appropriate text color.
 ///
-/// `GetSysColor(COLOR_BTNTEXT)` is the safest signal for the active
-/// Windows theme — it returns near-black on light themes and near-white
-/// on dark themes, and updates immediately when the user flips the
-/// setting in Personalization. On very old systems where the call fails
-/// we fall back to the original hard-coded dark grey so the app at
-/// least stays readable on a light taskbar.
+/// Windows 10/11 dark mode does not reliably update `GetSysColor` for
+/// Win32 apps — the registry value `AppsUseLightTheme` is the ground
+/// truth. We read it directly:
+///   0 = dark mode  → white text
+///   1 = light mode → near-black text
+/// Fallback: if the registry read fails, we use `GetSysColor(COLOR_BTNTEXT)`
+/// as a secondary signal.
 pub fn current_theme_color() -> (u8, u8, u8) {
+    if is_dark_mode() {
+        (255, 255, 255)
+    } else {
+        (30, 30, 30)
+    }
+}
+
+/// Read `AppsUseLightTheme` from the registry. Returns `true` for dark mode.
+fn is_dark_mode() -> bool {
     unsafe {
-        let cr = GetSysColor(COLOR_BTNTEXT);
-        // COLORREF: 0x00BBGGRR — red in the low byte.
-        let r = (cr & 0xFF) as u8;
-        let g = ((cr >> 8) & 0xFF) as u8;
-        let b = ((cr >> 16) & 0xFF) as u8;
-        // Win32 returns 0 if the index is unknown — that would be pitch
-        // black, which is fine on a light taskbar but invisible on a dark
-        // one. We treat it as "unknown, use original" to stay safe.
-        if cr == 0 { (30, 30, 30) } else { (r, g, b) }
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let value_name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain([0]).collect();
+
+        let mut hkey: HKEY = std::ptr::null_mut();
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey);
+        if status != 0 {
+            // Registry read failed — fall back to GetSysColor heuristic.
+            let cr = GetSysColor(COLOR_BTNTEXT);
+            let r = (cr & 0xFF) as u32;
+            let g = ((cr >> 8) & 0xFF) as u32;
+            let b = ((cr >> 16) & 0xFF) as u32;
+            // If the color is bright, assume dark mode.
+            return (r + g + b) > 384;
+        }
+
+        let mut data: u32 = 1;
+        let mut data_size: u32 = 4;
+        let status = RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut data as *mut u32 as *mut u8,
+            &mut data_size,
+        );
+        RegCloseKey(hkey);
+
+        // 0 = dark mode, anything else = light mode.
+        status == 0 && data == 0
     }
 }
 
