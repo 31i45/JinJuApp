@@ -16,7 +16,7 @@ mod startup;
 mod tray;
 mod win32;
 
-use geometry::{Edge, Rect};
+use geometry::{Edge, Rect, TaskbarAnchors};
 use layout::Scroll;
 use quotes::{Bag, Rng, Source};
 use render::Surface;
@@ -104,13 +104,18 @@ struct App {
     /// In-flight quote crossfade; `None` = no transition.
     transition: Option<Transition>,
     exe_path: String,
+    /// Current theme color (R, G, B) — re-queried from the system on
+    /// every WM_SETTINGCHANGE so the strip stays visible under both
+    /// light and dark Windows themes.
+    current_color: (u8, u8, u8),
 }
 
 impl App {
     fn new(hwnd: HWND, dpi: u32, quotes: Source, exe_path: String) -> Option<App> {
         let win_w = scale_pt(WINDOW_W, dpi);
         let win_h = scale_pt(WINDOW_H, dpi);
-        let surface = Surface::new(win_w, win_h, dpi)?;
+        let current_color = render::current_theme_color();
+        let surface = Surface::with_color(win_w, win_h, dpi, current_color)?;
         let bag = Bag::new(quotes.lines().len());
         let speed_px_per_s = SCROLL_SPEED_LOGICAL * dpi as f32 / 96.0;
         Some(App {
@@ -129,6 +134,7 @@ impl App {
             last_presented_alpha: -1,
             transition: None,
             exe_path,
+            current_color,
         })
     }
 
@@ -253,28 +259,68 @@ impl App {
         }
     }
 
-    /// Move to the strip adjacent to the taskbar (any docked edge).
+    /// Move to the strip adjacent to the taskbar, dynamically avoiding
+    /// icon clusters by enumerating `Shell_TrayWnd` children. When a free
+    /// band is found that's smaller than the default strip width, we shrink
+    /// the window (Surface + Scroller) and request a crossfade reset so the
+    /// text re-measures against the new width.
     fn reposition(&mut self) {
         let Some((taskbar, edge, monitor)) = desktop_geometry() else {
             return;
         };
-        let r = geometry::place(
+        let anchors = taskbar_anchors(&taskbar, edge);
+        let desired_w = scale_pt(WINDOW_W, self.dpi);
+        let desired_h = scale_pt(WINDOW_H, self.dpi);
+        let r = geometry::place_dynamic(
             &taskbar,
             &monitor,
             edge,
-            self.win_w,
-            self.win_h,
+            desired_w,
+            desired_h,
             PLACE_MARGIN,
+            &anchors,
         );
+
+        // Dynamic width — rebuild Surface + Scroller only if it actually changed.
+        if r.width() != self.win_w {
+            let new_dpi_sized_w = r.width();
+            let new_h = r.height();
+            let Some(surface) = Surface::with_color(new_dpi_sized_w, new_h, self.dpi, self.current_color) else {
+                return;
+            };
+            self.surface = surface;
+            self.win_w = new_dpi_sized_w;
+            self.win_h = new_h;
+            let speed = SCROLL_SPEED_LOGICAL * self.dpi as f32 / 96.0;
+            self.scroll = Scroll::new(self.win_w, 0, speed);
+            self.transition = None;
+            self.refresh(); // re-measure text at the new width and redraw
+        }
+
         unsafe {
             MoveWindow(self.hwnd, r.left, r.top, self.win_w, self.win_h, 0);
         }
     }
 
+    /// System theme (dark/light) may have flipped — re-query the button
+    /// text color, re-tint the surface, and redraw the current frame.
+    fn on_theme_change(&mut self) {
+        let new_color = render::current_theme_color();
+        if new_color != self.current_color {
+            self.current_color = new_color;
+            self.surface.set_color(new_color);
+            self.present();
+        }
+    }
+
     /// DPI changed (window moved between monitors): rebuild at new size.
     fn on_dpi_changed(&mut self, dpi: u32, suggested: &RECT) {
-        let Some(surface) = Surface::new(scale_pt(WINDOW_W, dpi), scale_pt(WINDOW_H, dpi), dpi)
-        else {
+        let Some(surface) = Surface::with_color(
+            scale_pt(WINDOW_W, dpi),
+            scale_pt(WINDOW_H, dpi),
+            dpi,
+            self.current_color,
+        ) else {
             return;
         };
         self.surface = surface;
@@ -369,6 +415,98 @@ fn desktop_geometry() -> Option<(Rect, Edge, Rect)> {
     }
 }
 
+/// Discover `MSTaskListWClass` (icon cluster) and `TrayNotifyWnd` (system
+/// tray) inside `Shell_TrayWnd`. Returns `TaskbarAnchors`; missing fields
+/// become `None` (caller falls back to centered placement).
+fn taskbar_anchors(taskbar: &Rect, edge: Edge) -> TaskbarAnchors {
+    if edge != Edge::Bottom {
+        return TaskbarAnchors::default();
+    }
+
+    unsafe {
+        let tray_class = "Shell_TrayWnd";
+        let mut wide: Vec<u16> = tray_class.encode_utf16().chain([0]).collect();
+        let h_tray = FindWindowW(wide.as_ptr(), core::ptr::null());
+        if h_tray.is_null() {
+            return TaskbarAnchors::default();
+        }
+
+        let mut collector = AnchorCollector::default();
+        let ptr = &mut collector as *mut AnchorCollector as LPARAM;
+        EnumChildWindows(h_tray, Some(anchor_cb), ptr);
+        collector.filter_to_taskbar(taskbar);
+        collector.into_anchors()
+    }
+}
+
+/// Collects icon cluster + tray rects during `EnumChildWindows`.
+#[derive(Default)]
+struct AnchorCollector {
+    icons: Option<Rect>,
+    tray: Option<Rect>,
+}
+
+impl AnchorCollector {
+    fn filter_to_taskbar(&mut self, tb: &Rect) {
+        self.icons = self
+            .icons
+            .filter(|r| r.right > tb.left && r.left < tb.right && r.width() > 10 && r.height() > 0);
+        self.tray = self
+            .tray
+            .filter(|r| r.right > tb.left && r.left < tb.right && r.width() > 10 && r.height() > 0);
+    }
+
+    fn into_anchors(self) -> TaskbarAnchors {
+        TaskbarAnchors {
+            icons: self.icons,
+            tray: self.tray,
+        }
+    }
+}
+
+unsafe extern "system" fn anchor_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let mut class_buf = [0u16; 128];
+        let class_len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
+        if class_len <= 0 {
+            return 1;
+        }
+        let class = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+
+        // Icon container class names — multiple exist across Windows versions
+        // and Win11 sometimes marks MSTaskListWClass as invisible while the
+        // actual visible content lives in ReBarWindow32 / MSTaskSwWClass.
+        let is_icons = matches!(
+            class.as_str(),
+            "ReBarWindow32" | "MSTaskSwWClass" | "MSTaskListWClass"
+        );
+        let is_tray = class == "TrayNotifyWnd";
+        if !is_icons && !is_tray {
+            return 1;
+        }
+
+        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(hwnd, &mut wr) == 0 {
+            return 1;
+        }
+        if wr.right <= wr.left || wr.bottom <= wr.top {
+            return 1;
+        }
+        let p = lparam as *mut AnchorCollector;
+        if is_icons {
+            let new = Rect::from(wr);
+            match (*p).icons {
+                Some(existing) if new.width() > existing.width() => (*p).icons = Some(new),
+                None => (*p).icons = Some(new),
+                _ => {}
+            }
+        } else {
+            (*p).tray = Some(Rect::from(wr));
+        }
+        1
+    }
+}
+
 impl From<RECT> for Rect {
     fn from(r: RECT) -> Rect {
         Rect {
@@ -429,6 +567,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                             0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                         );
+                        // Cheap re-anchor every 500ms — catches taskbar
+                        // alignment changes (centered ↔ left) and dock-edge
+                        // moves that WM_SETTINGCHANGE misses. No render cost:
+                        // reposition only rebuilds Surface if width changed,
+                        // and EnumChildWindows is pure Win32.
+                        app.reposition();
                     }
                     _ => {}
                 }
@@ -446,6 +590,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
                 let Some(app) = app_of(hwnd) else { return 0 };
                 app.reposition();
+                app.on_theme_change();
                 0
             }
             WM_DESTROY => {
@@ -571,7 +716,7 @@ fn main() {
         alert(
             core::ptr::null_mut(),
             &format!(
-                "{reason}\n\n本次运行使用内置金句。修正该文件后重启应用即可。\n文件格式：[{{\"quote\": \"…\"}}, …]"
+                "{reason}\n\n本次运行使用内置金句。修正该文件后重启应用即可。\n文件格式：每行一句"
             ),
         );
     }

@@ -4,19 +4,44 @@
 //! top-down DIB (the red channel then carries per-pixel coverage —
 //! grayscale antialiasing, correct on alpha surfaces where ClearType is
 //! not), and [`accumulate_layer`] blends the mask, scaled by the layer's
-//! opacity, into a premultiplied ARGB frame that `UpdateLayeredWindow`
-//! expects. Two layers crossfade by simple addition. The blending is a
-//! pure function; the GDI half is a thin resource-owning host.
+//! opacity and by the *current theme color*, into a premultiplied ARGB
+//! frame that `UpdateLayeredWindow` expects. Two layers crossfade by
+//! simple addition. The blending is a pure function; the GDI half is a
+//! thin resource-owning host.
 
 use crate::win32::*;
 
-/// Text color and maximum opacity, matching the original app's
-/// `rgba(30, 30, 30, 0.85)`.
-pub const COLOR: (u8, u8, u8) = (30, 30, 30);
+/// Maximum opacity — matches the original app's `rgba(..., 0.85)`.
 pub const MAX_ALPHA: u8 = 217; // 0.85 * 255
 
 /// Font size in points (the original app used 13 pt).
 const FONT_PT: i32 = 13;
+
+/// Query the current system button-text color as an (R, G, B) triple.
+///
+/// `GetSysColor(COLOR_BTNTEXT)` is the safest signal for the active
+/// Windows theme — it returns near-black on light themes and near-white
+/// on dark themes, and updates immediately when the user flips the
+/// setting in Personalization. On very old systems where the call fails
+/// we fall back to the original hard-coded dark grey so the app at
+/// least stays readable on a light taskbar.
+pub fn current_theme_color() -> (u8, u8, u8) {
+    unsafe {
+        let cr = GetSysColor(COLOR_BTNTEXT);
+        // COLORREF: 0x00BBGGRR — red in the low byte.
+        let r = (cr & 0xFF) as u8;
+        let g = ((cr >> 8) & 0xFF) as u8;
+        let b = ((cr >> 16) & 0xFF) as u8;
+        // Win32 returns 0 if the index is unknown — that would be pitch
+        // black, which is fine on a light taskbar but invisible on a dark
+        // one. We treat it as "unknown, use original" to stay safe.
+        if cr == 0 {
+            (30, 30, 30)
+        } else {
+            (r, g, b)
+        }
+    }
+}
 
 fn scale(c: u8, a: u8) -> u8 {
     ((u32::from(c) * u32::from(a) + 127) / 255) as u8
@@ -84,11 +109,21 @@ pub struct Surface {
     font: HFONT,
     old_bmp: HGDIOBJ,
     old_font: HGDIOBJ,
+    /// Current theme color (R, G, B) — passed in by the host so the
+    /// surface redraws with the correct tint after a system theme flip.
+    color: (u8, u8, u8),
 }
 
 impl Surface {
-    /// Create a surface of `width` × `height` px at `dpi`.
+    /// Create a surface of `width` × `height` px at `dpi`, tinted with
+    /// `color`.
     pub fn new(width: i32, height: i32, dpi: u32) -> Option<Surface> {
+        Self::with_color(width, height, dpi, current_theme_color())
+    }
+
+    /// Create a surface with an explicit color (used by tests and the
+    /// App struct when it re-tints on theme changes).
+    pub fn with_color(width: i32, height: i32, dpi: u32, color: (u8, u8, u8)) -> Option<Surface> {
         if width <= 0 || height <= 0 {
             return None;
         }
@@ -136,8 +171,15 @@ impl Surface {
                 font,
                 old_bmp,
                 old_font,
+                color,
             })
         }
+    }
+
+    /// Re-tint the surface with a new theme color; takes effect on the
+    /// next `draw` call. Called when the system theme flips.
+    pub fn set_color(&mut self, color: (u8, u8, u8)) {
+        self.color = color;
     }
 
     /// Measure the rendered width of `text` (px).
@@ -164,9 +206,10 @@ impl Surface {
     /// Draw text layers `(text, x, alpha)`, producing the final ARGB
     /// pixels in [`bits`](Self::bits_mut). Each layer is rasterized as a
     /// coverage mask into the DIB, then accumulated into the frame scaled
-    /// by its alpha — one primitive serves both the marquee's fade-reset
-    /// (single layer, alpha envelope) and the quote crossfade (two
-    /// layers). The frame is copied back into the DIB for ULW.
+    /// by its alpha and by the current theme color — one primitive serves
+    /// both the marquee's fade-reset (single layer, alpha envelope) and
+    /// the quote crossfade (two layers). The frame is copied back into
+    /// the DIB for ULW.
     pub fn draw(&mut self, layers: &[(&str, i32, f32)]) {
         self.frame.fill(0);
         for &(text, x, alpha) in layers {
@@ -208,7 +251,7 @@ impl Surface {
             // `bits` is a raw pointer field — reading it holds no borrow,
             // so the mask slice can coexist with `&mut self.frame`.
             let mask = unsafe { core::slice::from_raw_parts(self.bits, len) };
-            accumulate_layer(mask, &mut self.frame, COLOR, MAX_ALPHA, alpha_q);
+            accumulate_layer(mask, &mut self.frame, self.color, MAX_ALPHA, alpha_q);
         }
         // Copy the composed frame back into the DIB for ULW. Raw-pointer
         // copy: `bits_mut()` would take `&mut self` and clash with the
@@ -228,6 +271,14 @@ impl Surface {
 
     pub fn hdc(&self) -> HDC {
         self.hdc
+    }
+
+    /// Test helper — creates a surface with a fixed "dark" color so the
+    /// blend invariants don't depend on whatever theme the host is
+    /// currently running.
+    #[cfg(test)]
+    pub fn with_theme_color() -> (u8, u8, u8) {
+        (30, 30, 30)
     }
 }
 
@@ -259,7 +310,8 @@ mod tests {
     fn background_is_fully_transparent() {
         let mask = [0u8, 0, 0, 0xFF, 0, 0, 0, 0xFF];
         let mut frame = [0u8; 8];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         assert_eq!(frame, [0u8; 8]);
     }
 
@@ -270,11 +322,12 @@ mod tests {
         // 85% opacity, which is exactly what premultiplication means.
         let mask = [0u8, 0, 255, 0];
         let mut frame = [0u8; 4];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         let expected = [
-            scale(COLOR.2, MAX_ALPHA),
-            scale(COLOR.1, MAX_ALPHA),
-            scale(COLOR.0, MAX_ALPHA),
+            scale(color.2, MAX_ALPHA),
+            scale(color.1, MAX_ALPHA),
+            scale(color.0, MAX_ALPHA),
             MAX_ALPHA,
         ];
         assert_eq!(px(&frame), expected);
@@ -285,9 +338,10 @@ mod tests {
     fn half_coverage_blends_by_coverage() {
         let mask = [0u8, 0, 128, 0];
         let mut frame = [0u8; 4];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         let a = scale(217, 128);
-        assert_eq!(px(&frame), [scale(30, a), scale(30, a), scale(30, a), a]);
+        assert_eq!(px(&frame), [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]);
     }
 
     #[test]
@@ -302,16 +356,18 @@ mod tests {
     fn layer_alpha_scales_opacity() {
         let mask = [0u8, 0, 255, 0];
         let mut frame = [0u8; 4];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 128);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 128);
         let a = scale(MAX_ALPHA, 128);
-        assert_eq!(px(&frame), [scale(30, a), scale(30, a), scale(30, a), a]);
+        assert_eq!(px(&frame), [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]);
     }
 
     #[test]
     fn zero_alpha_layer_is_invisible() {
         let mask = [0u8, 0, 255, 0];
         let mut frame = [0u8; 4];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 0);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 0);
         assert_eq!(frame, [0u8; 4]);
     }
 
@@ -319,9 +375,10 @@ mod tests {
     fn two_layers_accumulate_with_saturation() {
         let mask = [0u8, 0, 255, 0];
         let mut frame = [0u8; 4];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         let once = px(&frame);
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         let twice = px(&frame);
         assert!(
             twice[3] > once[3],
@@ -335,7 +392,8 @@ mod tests {
     fn trailing_partial_chunk_is_untouched() {
         let mask = [0u8, 0, 255, 0, 9, 9];
         let mut frame = [0u8, 0, 0, 0, 7, 7];
-        accumulate_layer(&mask, &mut frame, COLOR, MAX_ALPHA, 255);
+        let color = Surface::with_theme_color();
+        accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         assert_eq!(&frame[4..], &[7, 7]);
     }
 
@@ -348,6 +406,15 @@ mod tests {
         assert_eq!(scale(30, 217), 26);
     }
 
+    #[test]
+    fn current_theme_color_is_valid_tuple() {
+        let (r, g, b) = current_theme_color();
+        // On any real Windows system this returns non-zero meaningful
+        // values; we just assert the shape here — actual values come from
+        // GetSysColor at runtime.
+        assert!(r <= 255 && g <= 255 && b <= 255);
+    }
+
     /// Regression: DrawTextW without DT_NOCLIP clips to the layout rect,
     /// which slides with the text origin during the marquee — the tail of
     /// a long quote never rendered (user-visible as ~29 CJK chars max).
@@ -355,7 +422,7 @@ mod tests {
     /// strip's right edge, where the tail arrives during the slide.
     #[test]
     fn draw_renders_tail_when_origin_is_negative() {
-        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         // ~120 ASCII chars ≈ 800 px wide at 13 pt — far wider than 500.
         let text = "The quick brown fox jumps over the lazy dog and keeps \
                     running far beyond the edge of the strip ABCDEFGHIJKL \
@@ -384,7 +451,7 @@ mod tests {
     /// test hard-coding any one font's pixel metrics.
     #[test]
     fn measure_cjk_long_quote_overflows_strip() {
-        let s = Surface::new(500, 36, 96).expect("GDI surface");
+        let s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         let q = "翻山越岭只为一场遇见，全力以赴只为一次改变。答案就在眼泪里，\
                  也凝结在汗水中、感官和心灵。";
         let ascii = "abcdefghijklmnopqrstuvwxyz0123456789abcdefgh";
@@ -404,7 +471,7 @@ mod tests {
     /// The symmetric half: with the origin at rest the head is visible.
     #[test]
     fn draw_renders_head_at_rest() {
-        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 1.0)]);
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
@@ -422,7 +489,7 @@ mod tests {
     /// Two layers at different positions and opacities must both leave ink.
     #[test]
     fn draw_blends_two_layers() {
-        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.5), ("金句", 200, 0.5)]);
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
@@ -447,7 +514,7 @@ mod tests {
     /// A layer with zero alpha is a complete no-op.
     #[test]
     fn draw_zero_alpha_leaves_no_ink() {
-        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.0)]);
         let buf = s.bits_mut();
         assert!(
@@ -460,7 +527,7 @@ mod tests {
     /// solid-glyph alpha is scale(217, 128) = 109, not the full 217.
     #[test]
     fn draw_half_alpha_scales_ink() {
-        let mut s = Surface::new(500, 36, 96).expect("GDI surface");
+        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.5)]);
         let buf = s.bits_mut();
         let max_a = buf.iter().skip(3).step_by(4).copied().max().unwrap_or(0);

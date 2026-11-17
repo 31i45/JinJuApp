@@ -327,6 +327,11 @@ unsafe extern "system" {
 }
 
 // ---------------------------------------------------------------------------
+// sys color constants
+// ---------------------------------------------------------------------------
+pub const COLOR_BTNTEXT: i32 = 8; // System button text color — follows the active theme
+
+// ---------------------------------------------------------------------------
 // user32
 // ---------------------------------------------------------------------------
 
@@ -413,6 +418,7 @@ unsafe extern "system" {
     pub fn DestroyMenu(hMenu: HMENU) -> BOOL;
     pub fn CheckMenuItem(hMenu: HMENU, uIDCheckItem: u32, uCheck: u32) -> u32;
     pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+    pub fn GetSysColor(nIndex: i32) -> DWORD;
     pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: isize) -> isize;
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> isize;
     pub fn MonitorFromPoint(pt: POINT, dwFlags: u32) -> HANDLE;
@@ -420,6 +426,14 @@ unsafe extern "system" {
     pub fn MessageBoxW(hWnd: HWND, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
     pub fn IsWindowVisible(hWnd: HWND) -> BOOL;
     pub fn FillRect(hdc: HDC, lprc: *mut RECT, hbr: HBRUSH) -> i32;
+    pub fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
+    pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+    pub fn EnumChildWindows(
+        hWndParent: HWND,
+        lpEnumFunc: Option<unsafe extern "system" fn(HWND, LPARAM) -> BOOL>,
+        lParam: LPARAM,
+    ) -> BOOL;
+    pub fn GetClassNameW(hWnd: HWND, lpClassName: *mut u16, nMaxCount: i32) -> i32;
 }
 
 pub const GWLP_USERDATA: i32 = -21;
