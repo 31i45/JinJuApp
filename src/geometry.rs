@@ -105,8 +105,18 @@ pub fn place_dynamic(
             let (x, w) = place_bottom(taskbar, monitor, desired_w, margin, anchors);
             Rect::new(x, monitor.bottom - win_h - BOTTOM_INSET, w, win_h)
         }
-        Edge::Top => Rect::new(monitor.left + margin, taskbar.bottom + margin, desired_w, win_h),
-        Edge::Left => Rect::new(taskbar.right + margin, monitor.top + margin, desired_w, win_h),
+        Edge::Top => Rect::new(
+            monitor.left + margin,
+            taskbar.bottom + margin,
+            desired_w,
+            win_h,
+        ),
+        Edge::Left => Rect::new(
+            taskbar.right + margin,
+            monitor.top + margin,
+            desired_w,
+            win_h,
+        ),
         Edge::Right => Rect::new(
             taskbar.left - desired_w - margin,
             monitor.top + margin,
@@ -210,7 +220,15 @@ mod tests {
         // Win10: icons start at ~50px (right after Start button), gap = 50 ≤ 80 → 靠左模式.
         let icons = Rect::new(50, 1032, 900, 48);
         let tray = Rect::new(1800, 1032, 120, 48);
-        let r = place_dynamic(&TB, &M, Edge::Bottom, 500, 45, 10, &a(Some(icons), Some(tray)));
+        let r = place_dynamic(
+            &TB,
+            &M,
+            Edge::Bottom,
+            500,
+            45,
+            10,
+            &a(Some(icons), Some(tray)),
+        );
         // strip_w = 1800 - 950 - 20 = 830. min(830, 500) = 500.
         assert_eq!(r.width(), 500);
         assert_eq!(r.left, 960);
@@ -221,7 +239,15 @@ mod tests {
     fn left_aligned_shrink_when_tray_grows_left() {
         let icons = Rect::new(50, 1032, 900, 48);
         let tray = Rect::new(1400, 1032, 120, 48);
-        let r = place_dynamic(&TB, &M, Edge::Bottom, 500, 45, 10, &a(Some(icons), Some(tray)));
+        let r = place_dynamic(
+            &TB,
+            &M,
+            Edge::Bottom,
+            500,
+            45,
+            10,
+            &a(Some(icons), Some(tray)),
+        );
         assert_eq!(r.width(), 430);
         assert_eq!(r.left, 960);
     }
@@ -230,7 +256,15 @@ mod tests {
     fn left_aligned_shrink_when_icons_grow_right() {
         let icons = Rect::new(50, 1032, 1200, 48);
         let tray = Rect::new(1800, 1032, 120, 48);
-        let r = place_dynamic(&TB, &M, Edge::Bottom, 500, 45, 10, &a(Some(icons), Some(tray)));
+        let r = place_dynamic(
+            &TB,
+            &M,
+            Edge::Bottom,
+            500,
+            45,
+            10,
+            &a(Some(icons), Some(tray)),
+        );
         assert_eq!(r.width(), 500);
         assert_eq!(r.left, 1260); // icons.right = 1250 + margin 10
     }
@@ -247,7 +281,15 @@ mod tests {
 
     #[test]
     fn no_icons_falls_back_to_center() {
-        let r = place_dynamic(&TB, &M, Edge::Bottom, 500, 45, 10, &TaskbarAnchors::default());
+        let r = place_dynamic(
+            &TB,
+            &M,
+            Edge::Bottom,
+            500,
+            45,
+            10,
+            &TaskbarAnchors::default(),
+        );
         assert_eq!(r.width(), 500);
         assert_eq!(r.left, 710);
     }
@@ -257,7 +299,15 @@ mod tests {
     #[test]
     fn top_taskbar_strip_below_bar() {
         let top_tb = Rect::new(0, 0, 1920, 48);
-        let r = place_dynamic(&top_tb, &M, Edge::Top, 500, 45, 10, &TaskbarAnchors::default());
+        let r = place_dynamic(
+            &top_tb,
+            &M,
+            Edge::Top,
+            500,
+            45,
+            10,
+            &TaskbarAnchors::default(),
+        );
         assert_eq!(r.top, 58);
         assert_eq!(r.left, 10);
     }
@@ -272,7 +322,15 @@ mod tests {
     #[test]
     fn right_taskbar_strip_left_of_bar() {
         let tb = Rect::new(1872, 0, 48, 1080);
-        let r = place_dynamic(&tb, &M, Edge::Right, 500, 45, 10, &TaskbarAnchors::default());
+        let r = place_dynamic(
+            &tb,
+            &M,
+            Edge::Right,
+            500,
+            45,
+            10,
+            &TaskbarAnchors::default(),
+        );
         assert_eq!(r.right, 1862);
     }
 
@@ -296,7 +354,15 @@ mod tests {
     #[test]
     fn autohide_taskbar_strip_stays_visible() {
         let tb = Rect::new(0, 1072, 1920, 8);
-        let r = place_dynamic(&tb, &M, Edge::Bottom, 500, 45, 10, &TaskbarAnchors::default());
+        let r = place_dynamic(
+            &tb,
+            &M,
+            Edge::Bottom,
+            500,
+            45,
+            10,
+            &TaskbarAnchors::default(),
+        );
         assert_eq!(r.bottom, M.bottom - BOTTOM_INSET);
         assert!(r.top < tb.top);
     }

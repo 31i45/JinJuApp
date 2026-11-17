@@ -285,7 +285,9 @@ impl App {
         if r.width() != self.win_w {
             let new_dpi_sized_w = r.width();
             let new_h = r.height();
-            let Some(surface) = Surface::with_color(new_dpi_sized_w, new_h, self.dpi, self.current_color) else {
+            let Some(surface) =
+                Surface::with_color(new_dpi_sized_w, new_h, self.dpi, self.current_color)
+            else {
                 return;
             };
             self.surface = surface;
@@ -425,7 +427,7 @@ fn taskbar_anchors(taskbar: &Rect, edge: Edge) -> TaskbarAnchors {
 
     unsafe {
         let tray_class = "Shell_TrayWnd";
-        let mut wide: Vec<u16> = tray_class.encode_utf16().chain([0]).collect();
+        let wide: Vec<u16> = tray_class.encode_utf16().chain([0]).collect();
         let h_tray = FindWindowW(wide.as_ptr(), core::ptr::null());
         if h_tray.is_null() {
             return TaskbarAnchors::default();
@@ -485,7 +487,12 @@ unsafe extern "system" fn anchor_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
             return 1;
         }
 
-        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if GetWindowRect(hwnd, &mut wr) == 0 {
             return 1;
         }

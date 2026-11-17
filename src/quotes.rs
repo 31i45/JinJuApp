@@ -143,27 +143,23 @@ pub fn load(dir: &Path) -> Source {
     }
 
     // 2. Legacy JSON present — one-shot migration to TXT.
-    if json_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&json_path) {
-            if let Ok(lines) = parse_json(&raw) {
-                // Write out the TXT sibling; keep the original JSON around.
-                let txt_body = lines.join("\n");
-                match fs::write(&txt_path, txt_body) {
-                    Ok(_) => return Source::Migrated(lines),
-                    Err(e) => {
-                        return Source::Fallback {
-                            lines: embedded(),
-                            reason: format!(
-                                "迁移失败 (无法写入 {}): {e}",
-                                txt_path.display()
-                            ),
-                        };
-                    }
-                }
+    if json_path.exists()
+        && let Ok(raw) = fs::read_to_string(&json_path)
+        && let Ok(lines) = parse_json(&raw)
+    {
+        // Write out the TXT sibling; keep the original JSON around.
+        let txt_body = lines.join("\n");
+        match fs::write(&txt_path, txt_body) {
+            Ok(_) => return Source::Migrated(lines),
+            Err(e) => {
+                return Source::Fallback {
+                    lines: embedded(),
+                    reason: format!("迁移失败 (无法写入 {}): {e}", txt_path.display()),
+                };
             }
-            // JSON parse failed — fall through to export.
         }
     }
+    // JSON missing / unreadable / unparseable — fall through to export.
 
     // 3. No usable file: export embedded corpus to TXT.
     match fs::write(&txt_path, EMBEDDED) {
@@ -371,14 +367,13 @@ mod tests {
     #[test]
     fn load_migrates_legacy_json() {
         let dir = temp_dir("migrate");
-        fs::write(
-            dir.join(LEGACY_JSON),
-            r#"[{"quote":"来自旧 JSON 的句子"}]"#,
-        )
-        .unwrap();
+        fs::write(dir.join(LEGACY_JSON), r#"[{"quote":"来自旧 JSON 的句子"}]"#).unwrap();
         let src = load(&dir);
         assert!(matches!(src, Source::Migrated(_)));
-        assert!(dir.join(FILE_NAME).exists(), "TXT must be on disk after migration");
+        assert!(
+            dir.join(FILE_NAME).exists(),
+            "TXT must be on disk after migration"
+        );
         let on_disk = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert_eq!(on_disk, "来自旧 JSON 的句子");
         fs::remove_dir_all(&dir).ok();

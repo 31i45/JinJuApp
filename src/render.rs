@@ -35,11 +35,7 @@ pub fn current_theme_color() -> (u8, u8, u8) {
         // Win32 returns 0 if the index is unknown — that would be pitch
         // black, which is fine on a light taskbar but invisible on a dark
         // one. We treat it as "unknown, use original" to stay safe.
-        if cr == 0 {
-            (30, 30, 30)
-        } else {
-            (r, g, b)
-        }
+        if cr == 0 { (30, 30, 30) } else { (r, g, b) }
     }
 }
 
@@ -115,12 +111,6 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// Create a surface of `width` × `height` px at `dpi`, tinted with
-    /// `color`.
-    pub fn new(width: i32, height: i32, dpi: u32) -> Option<Surface> {
-        Self::with_color(width, height, dpi, current_theme_color())
-    }
-
     /// Create a surface with an explicit color (used by tests and the
     /// App struct when it re-tints on theme changes).
     pub fn with_color(width: i32, height: i32, dpi: u32, color: (u8, u8, u8)) -> Option<Surface> {
@@ -341,7 +331,10 @@ mod tests {
         let color = Surface::with_theme_color();
         accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 255);
         let a = scale(217, 128);
-        assert_eq!(px(&frame), [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]);
+        assert_eq!(
+            px(&frame),
+            [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]
+        );
     }
 
     #[test]
@@ -359,7 +352,10 @@ mod tests {
         let color = Surface::with_theme_color();
         accumulate_layer(&mask, &mut frame, color, MAX_ALPHA, 128);
         let a = scale(MAX_ALPHA, 128);
-        assert_eq!(px(&frame), [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]);
+        assert_eq!(
+            px(&frame),
+            [scale(color.0, a), scale(color.1, a), scale(color.2, a), a]
+        );
     }
 
     #[test]
@@ -412,7 +408,7 @@ mod tests {
         // On any real Windows system this returns non-zero meaningful
         // values; we just assert the shape here — actual values come from
         // GetSysColor at runtime.
-        assert!(r <= 255 && g <= 255 && b <= 255);
+        assert!(r > 0 && g > 0 && b > 0);
     }
 
     /// Regression: DrawTextW without DT_NOCLIP clips to the layout rect,
@@ -422,7 +418,8 @@ mod tests {
     /// strip's right edge, where the tail arrives during the slide.
     #[test]
     fn draw_renders_tail_when_origin_is_negative() {
-        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
+        let mut s =
+            Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         // ~120 ASCII chars ≈ 800 px wide at 13 pt — far wider than 500.
         let text = "The quick brown fox jumps over the lazy dog and keeps \
                     running far beyond the edge of the strip ABCDEFGHIJKL \
@@ -471,7 +468,8 @@ mod tests {
     /// The symmetric half: with the origin at rest the head is visible.
     #[test]
     fn draw_renders_head_at_rest() {
-        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
+        let mut s =
+            Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 1.0)]);
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
@@ -489,7 +487,8 @@ mod tests {
     /// Two layers at different positions and opacities must both leave ink.
     #[test]
     fn draw_blends_two_layers() {
-        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
+        let mut s =
+            Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.5), ("金句", 200, 0.5)]);
         let (w, h) = (s.width as usize, s.height as usize);
         let buf = s.bits_mut();
@@ -514,7 +513,8 @@ mod tests {
     /// A layer with zero alpha is a complete no-op.
     #[test]
     fn draw_zero_alpha_leaves_no_ink() {
-        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
+        let mut s =
+            Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.0)]);
         let buf = s.bits_mut();
         assert!(
@@ -527,7 +527,8 @@ mod tests {
     /// solid-glyph alpha is scale(217, 128) = 109, not the full 217.
     #[test]
     fn draw_half_alpha_scales_ink() {
-        let mut s = Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
+        let mut s =
+            Surface::with_color(500, 36, 96, Surface::with_theme_color()).expect("GDI surface");
         s.draw(&[("金句", 15, 0.5)]);
         let buf = s.bits_mut();
         let max_a = buf.iter().skip(3).step_by(4).copied().max().unwrap_or(0);
