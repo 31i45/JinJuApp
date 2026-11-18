@@ -4,6 +4,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         winres::WindowsResource::new()
             .set_icon("logo.ico")
+            .set("FileDescription", "JinJuApp - Taskbar Quote Ticker")
+            .set("LegalCopyright", "MIT License")
             .compile()
             .expect("winres: failed to embed icon");
     }
