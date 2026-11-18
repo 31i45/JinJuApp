@@ -17,6 +17,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Check tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $version = $line.Matches[0].Groups[1].Value
+          Write-Output "tag=$tag cargo=$version"
+          if ($tag -ne $version) {
+            throw "tag ${{ github.ref_name }} does not match Cargo.toml version $version - bump [package].version before tagging"
+          }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
