@@ -569,7 +569,7 @@ unsafe fn is_fullscreen_active(strip_hwnd: HWND) -> bool {
     // it's the *same* display the JinJu strip lives on — otherwise a
     // fullscreen movie on monitor 1 would hide the strip on monitor 2
     // too, which would defeat AC-5 (multi-monitor isolation).
-    let shell_says_fullscreen = if let Some(func) = sh_query_notification_state() {
+    let _shell_says_fullscreen = if let Some(func) = sh_query_notification_state() {
         let state = func();
         state == QUNS_FULL_SCREEN || state == QUNS_BUSY
     } else {
@@ -632,23 +632,33 @@ unsafe fn is_fullscreen_active(strip_hwnd: HWND) -> bool {
     let rect_fits_fullscreen =
         rect_approximately_equal(&fg_rect, &mi.rcMonitor, RECT_TOLERANCE_PX);
 
-    // Decision table — both signals must agree that this monitor is
-    // the one being covered:
+    // Decision table — both signals must point to this monitor being
+    // covered, never let the system-level shell signal hide the strip
+    // just because *another* display has a fullscreen app running.
     //
-    //   Signal 2 (rect fits)  Signal 1 (shell says)  same_monitor  Result
+    //   rect_fits_fullscreen  shell_says_fullscreen  same_monitor  Result
     //   --------------------  --------------------  ------------  ------
     //   true                  *                    true          hide ✅
-    //   false                 true                 true          hide ✅
-    //                                 (fallback: borderless
-    //                                  fullscreen missed by
-    //                                  rect comp but shell saw)
+    //                                 (foreground window on OUR
+    //                                  monitor actually covers
+    //                                  the whole screen)
+    //   false                 true                 true          show ✅
+    //                                 (shell says SOME display
+    //                                  is fullscreen, but our fg
+    //                                  window isn't even close to
+    //                                  fullscreen — it's probably
+    //                                  a DIFFERENT display that's
+    //                                  in immersive mode)
     //   *                     *                    false         show ✅
-    //                                 (other display's
-    //                                  fullscreen — not ours)
+    //                                 (foreground lives on
+    //                                  another display — not ours)
     //   false                 false                true          show ✅
     //                                 (normal window on our
     //                                  display — strip stays)
-    same_monitor && (rect_fits_fullscreen || shell_says_fullscreen)
+    same_monitor && rect_fits_fullscreen
+    // shell_says_fullscreen is intentionally NOT OR'd here — it
+    // broadens the trigger to cross-display scenarios. We still
+    // keep it above for diagnostic use if needed later.
     }
 }
 
