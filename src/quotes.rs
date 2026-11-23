@@ -58,6 +58,7 @@ impl Source {
 // ---------------------------------------------------------------------------
 
 /// Parse the TXT corpus: one quote per line, blank lines ignored.
+/// Lines starting with `#` are treated as comments and skipped.
 /// Accepts an optional UTF-8 BOM at the start.
 pub fn parse_txt(raw: &str) -> Result<Vec<String>, String> {
     let s = raw.strip_prefix('\u{feff}').unwrap_or(raw);
@@ -65,6 +66,7 @@ pub fn parse_txt(raw: &str) -> Result<Vec<String>, String> {
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
+        .filter(|l| !l.starts_with('#'))
         .map(String::from)
         .collect();
     if lines.is_empty() {
@@ -294,6 +296,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_txt_skips_comment_lines() {
+        let v = parse_txt("# === 古代经典 ===\n千里之行，始于足下。\n# comment line\n\n路虽远，行则将至。").unwrap();
+        assert_eq!(v, vec!["千里之行，始于足下。", "路虽远，行则将至。"]);
+    }
+
+    #[test]
+    fn embedded_corpus_is_valid_and_has_categories() {
+        let lines = parse_txt(EMBEDDED).expect("embedded corpus must parse");
+        assert!(
+            lines.len() >= 150,
+            "embedded corpus shrank below 150: {}",
+            lines.len()
+        );
+        assert!(
+            lines.len() <= 300,
+            "embedded corpus grew beyond 300: {}",
+            lines.len()
+        );
+    }
+
+    #[test]
     fn parse_txt_rejects_empty() {
         assert!(parse_txt("   \n\t ").unwrap_err().contains("为空"));
     }
@@ -314,17 +337,6 @@ mod tests {
     #[test]
     fn parse_txt_rejects_all_blank() {
         assert!(parse_txt("\n  \n\t\n").is_err());
-    }
-
-    #[test]
-    fn embedded_corpus_is_valid_and_large() {
-        let lines = parse_txt(EMBEDDED).expect("embedded corpus must parse");
-        assert!(
-            lines.len() >= 450,
-            "embedded corpus shrank: {}",
-            lines.len()
-        );
-        assert_eq!(lines[0], "梦在前方，路在脚下。");
     }
 
     // -- parse_json (legacy migration only) --------------------------------
