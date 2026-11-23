@@ -27,6 +27,7 @@ pub type HBITMAP = HANDLE;
 pub type HBRUSH = HANDLE;
 pub type HMENU = HANDLE;
 pub type HINSTANCE = HANDLE;
+pub type HMODULE = HANDLE;
 pub type HGDIOBJ = HANDLE;
 pub type HKEY = *mut c_void;
 pub type LPARAM = isize;
@@ -248,6 +249,7 @@ pub const WM_DPICHANGED: u32 = 0x02E0;
 
 // show / positioning
 pub const SW_SHOWNOACTIVATE: i32 = 4;
+pub const SW_HIDE: i32 = 0;
 pub const HWND_TOPMOST: HWND = core::ptr::without_provenance_mut(usize::MAX);
 pub const SWP_NOSIZE: u32 = 0x0001;
 pub const SWP_NOMOVE: u32 = 0x0002;
@@ -293,11 +295,20 @@ pub const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
 pub const LOGPIXELSX: i32 = 88;
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
 pub const MONITOR_DEFAULTTOPRIMARY: u32 = 1;
+pub const MONITOR_DEFAULTTONEAREA: u32 = 2;
 pub const MB_OK: u32 = 0x0000_0000;
 pub const MB_ICONWARNING: u32 = 0x0000_0030;
 pub const MB_SETFOREGROUND: u32 = 0x0001_0000;
 pub const IDC_ARROW: *const u16 = core::ptr::without_provenance(32512); // MAKEINTRESOURCE
 pub const IMAGE_ICON_APP: *const u16 = core::ptr::without_provenance(1); // winres icon resource ID 1
+
+// ancestor flags for GetAncestor
+pub const GA_ROOT: u32 = 2;
+
+// QUERY_USER_NOTIFICATION_STATE
+pub const QUNS_NOT_PRESENT: u32 = 0;
+pub const QUNS_BUSY: u32 = 2;
+pub const QUNS_FULL_SCREEN: u32 = 3;
 
 // registry
 pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001usize as HKEY;
@@ -322,6 +333,8 @@ unsafe extern "system" {
     pub fn GetLastError() -> u32;
     pub fn GetModuleFileNameW(hModule: HINSTANCE, lpFilename: *mut u16, nSize: u32) -> u32;
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
+    pub fn LoadLibraryW(lpLibFileName: *const u16) -> HMODULE;
+    pub fn GetProcAddress(hModule: HMODULE, lpProcName: *const u8) -> *mut c_void;
     pub fn GetTickCount64() -> u64;
     pub fn MulDiv(nNumber: i32, nNumerator: i32, nDenominator: i32) -> i32;
 }
@@ -422,6 +435,7 @@ unsafe extern "system" {
     pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: isize) -> isize;
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> isize;
     pub fn MonitorFromPoint(pt: POINT, dwFlags: u32) -> HANDLE;
+    pub fn MonitorFromWindow(hWnd: HWND, dwFlags: u32) -> HANDLE;
     pub fn GetMonitorInfoW(hMonitor: HANDLE, lpmi: *mut MONITORINFO) -> BOOL;
     pub fn MessageBoxW(hWnd: HWND, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
     pub fn IsWindowVisible(hWnd: HWND) -> BOOL;
@@ -434,6 +448,8 @@ unsafe extern "system" {
         lParam: LPARAM,
     ) -> BOOL;
     pub fn GetClassNameW(hWnd: HWND, lpClassName: *mut u16, nMaxCount: i32) -> i32;
+    pub fn GetForegroundWindow() -> HWND;
+    pub fn GetAncestor(hWnd: HWND, gaFlags: u32) -> HWND;
 }
 
 pub const GWLP_USERDATA: i32 = -21;
@@ -496,6 +512,45 @@ unsafe extern "system" {
         nShow: i32,
     ) -> HANDLE;
     pub fn SHAppBarMessage(dwMessage: u32, pData: *mut APPBARDATA) -> usize;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic function loading (for APIs not yet in shell32.lib of older SDKs)
+// ---------------------------------------------------------------------------
+
+/// `ShQueryUserNotificationState` — shell32.dll ordinal export 281+ on
+/// Windows 10+. Not present on Windows 7; callers should fall back to
+/// rect comparison when this returns `None`.
+///
+/// We load it at runtime via `GetProcAddress` so a build against an
+/// older SDK still links.
+pub fn sh_query_notification_state() -> Option<unsafe extern "system" fn() -> u32> {
+    use std::sync::OnceLock;
+
+    type FnType = unsafe extern "system" fn() -> u32;
+    static PTR: OnceLock<Option<FnType>> = OnceLock::new();
+    let cached = PTR.get_or_init(|| {
+        unsafe {
+            let name = b"ShQueryUserNotificationState\0";
+            let shell32 = LoadLibraryW(wide_str("shell32.dll").as_ptr());
+            if shell32.is_null() {
+                return None;
+            }
+            // GetProcAddress takes a LPCSTR (ANSI)
+            let addr = GetProcAddress(shell32, name.as_ptr());
+            if addr.is_null() {
+                None
+            } else {
+                Some(core::mem::transmute::<*mut c_void, FnType>(addr))
+            }
+        }
+    });
+    *cached
+}
+
+/// Convert a Rust `&str` to a null-terminated wide (UTF-16) string.
+fn wide_str(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
 }
 
 // ---------------------------------------------------------------------------

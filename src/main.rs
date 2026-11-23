@@ -108,6 +108,9 @@ struct App {
     /// every WM_SETTINGCHANGE so the strip stays visible under both
     /// light and dark Windows themes.
     current_color: (u8, u8, u8),
+    /// True when a fullscreen application (game, video, browser) is
+    /// active and the strip must stay hidden so it doesn't block the view.
+    is_fullscreen: bool,
 }
 
 impl App {
@@ -135,6 +138,7 @@ impl App {
             transition: None,
             exe_path,
             current_color,
+            is_fullscreen: false,
         })
     }
 
@@ -526,6 +530,139 @@ impl From<RECT> for Rect {
 }
 
 // ---------------------------------------------------------------------------
+// Fullscreen detection
+// ---------------------------------------------------------------------------
+
+/// Tolerance (in pixels) for treating two rectangles as "the same". Some
+/// games report a window rect that is off-by-one from the monitor rect
+/// (DPI scaling quirks, non-client borders), so a small slack avoids
+/// false negatives.
+const RECT_TOLERANCE_PX: i32 = 2;
+
+/// Returns `true` when the foreground window covers the entire monitor that
+/// the JinJu strip currently lives on — i.e. the user is watching a movie,
+/// playing a game, or has a browser in true fullscreen.
+///
+/// Uses two independent signals so we catch both classic Win32 fullscreen
+/// (game, media player) and modern fullscreen (Chrome F11, video overlay):
+///
+///   1. `ShQueryUserNotificationState` — shell-level notification of
+///      `QUNS_FULL_SCREEN` or `QUNS_BUSY` (presentation, gaming, focus
+///      assist). This covers both exclusive fullscreen and borderless
+///      fullscreen apps that have told the shell they're in immersive mode.
+///
+///   2. Foreground-window-vs-monitor rect comparison — falls back for apps
+///      that don't advertise to the shell.
+///
+/// `strip_hwnd` is the JinJu window; we ask for the monitor it's on so
+/// multi-monitor setups only hide the strip that actually lives on the
+/// monitor being covered.
+unsafe fn is_fullscreen_active(strip_hwnd: HWND) -> bool {
+    unsafe {
+    // --- Signal 1: shell notification state ---
+    // Dynamically loaded because older Windows SDKs don't ship the
+    // static import for this function. Falls back to Signal 2 when
+    // the function isn't available.
+    //
+    // IMPORTANT: Signal 1 tells us "some app is fullscreening *any*
+    // display in the system". We still need Signal 2 to confirm that
+    // it's the *same* display the JinJu strip lives on — otherwise a
+    // fullscreen movie on monitor 1 would hide the strip on monitor 2
+    // too, which would defeat AC-5 (multi-monitor isolation).
+    let shell_says_fullscreen = if let Some(func) = sh_query_notification_state() {
+        let state = func();
+        state == QUNS_FULL_SCREEN || state == QUNS_BUSY
+    } else {
+        false
+    };
+
+    // --- Signal 2: foreground-window rect vs. monitor rect ---
+    // Get the monitor the strip currently occupies.
+    let monitor = MonitorFromWindow(strip_hwnd, MONITOR_DEFAULTTONEAREA);
+    if monitor.is_null() {
+        return false;
+    }
+    let mut mi = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        rcWork: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        dwFlags: 0,
+    };
+    if GetMonitorInfoW(monitor, &mut mi) == 0 {
+        return false;
+    }
+
+    // Foreground window (walk up to root in case of a child or tool
+    // window claiming foreground).
+    let fg = GetForegroundWindow();
+    if fg.is_null() || fg == strip_hwnd {
+        return false;
+    }
+    let root = GetAncestor(fg, GA_ROOT);
+    if root.is_null() || root == strip_hwnd {
+        return false;
+    }
+    let mut fg_rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetWindowRect(root, &mut fg_rect) == 0 {
+        return false;
+    }
+
+    // Partition: is the foreground window even *on the same monitor*
+    // as the strip? If it lives on a different display then neither
+    // signal should cause the strip to hide here — that display's
+    // immersive mode doesn't concern us (AC-5 multi-monitor isolation).
+    let fg_monitor = MonitorFromWindow(root, MONITOR_DEFAULTTONEAREA);
+    let same_monitor = !fg_monitor.is_null() && fg_monitor == monitor;
+
+    let rect_fits_fullscreen =
+        rect_approximately_equal(&fg_rect, &mi.rcMonitor, RECT_TOLERANCE_PX);
+
+    // Decision table — both signals must agree that this monitor is
+    // the one being covered:
+    //
+    //   Signal 2 (rect fits)  Signal 1 (shell says)  same_monitor  Result
+    //   --------------------  --------------------  ------------  ------
+    //   true                  *                    true          hide ✅
+    //   false                 true                 true          hide ✅
+    //                                 (fallback: borderless
+    //                                  fullscreen missed by
+    //                                  rect comp but shell saw)
+    //   *                     *                    false         show ✅
+    //                                 (other display's
+    //                                  fullscreen — not ours)
+    //   false                 false                true          show ✅
+    //                                 (normal window on our
+    //                                  display — strip stays)
+    same_monitor && (rect_fits_fullscreen || shell_says_fullscreen)
+    }
+}
+
+/// `true` when `a` and `b` differ by at most `tolerance` pixels on each side.
+/// Exposed for unit tests (the pure half of the function).
+fn rect_approximately_equal(a: &RECT, b: &RECT, tolerance: i32) -> bool {
+    let d_left = (a.left - b.left).abs();
+    let d_top = (a.top - b.top).abs();
+    let d_right = (a.right - b.right).abs();
+    let d_bottom = (a.bottom - b.bottom).abs();
+    d_left <= tolerance && d_top <= tolerance && d_right <= tolerance && d_bottom <= tolerance
+}
+
+// ---------------------------------------------------------------------------
 // Window procedure
 // ---------------------------------------------------------------------------
 
@@ -556,30 +693,56 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                         // Gentle recovery: if hidden (e.g. Win+D), re-show at
                         // the natural quote-change moment — never fight the
                         // user at 1 Hz like the original watchdog did.
-                        if IsWindowVisible(hwnd) == 0 {
+                        // BUT: never resurrect the strip while a fullscreen
+                        // app is active — that's the caller's job (see
+                        // Z_ORDER_TIMER), not the quote tick's.
+                        if !app.is_fullscreen && IsWindowVisible(hwnd) == 0 {
                             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                         }
                         app.next_quote();
                     }
                     SCROLL_TIMER => app.tick_scroll(),
                     Z_ORDER_TIMER => {
-                        // NOACTIVATE: never steal focus. No SHOWWINDOW: never
-                        // fight Win+D (visibility is owned by the quote tick).
-                        SetWindowPos(
-                            hwnd,
-                            HWND_TOPMOST,
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        );
-                        // Cheap re-anchor every 500ms — catches taskbar
-                        // alignment changes (centered ↔ left) and dock-edge
-                        // moves that WM_SETTINGCHANGE misses. No render cost:
-                        // reposition only rebuilds Surface if width changed,
-                        // and EnumChildWindows is pure Win32.
-                        app.reposition();
+                        // Fullscreen auto-hide check — runs every 500 ms so
+                        // the strip disappears within half a second of any
+                        // fullscreen app (Chrome F11, game, video player,
+                        // PowerPoint slide show).
+                        let fullscreen_now = is_fullscreen_active(hwnd);
+                        if fullscreen_now != app.is_fullscreen {
+                            if fullscreen_now {
+                                ShowWindow(hwnd, SW_HIDE);
+                            } else {
+                                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                                app.reposition();
+                            }
+                            app.is_fullscreen = fullscreen_now;
+                        }
+
+                        if app.is_fullscreen {
+                            // Strip is hidden — don't bother re-asserting
+                            // Z-order or repositioning. Skip both so we do
+                            // one lightweight call instead of three.
+                        } else {
+                            // NOACTIVATE: never steal focus. No SHOWWINDOW:
+                            // never fight Win+D (visibility is owned by
+                            // the quote tick).
+                            SetWindowPos(
+                                hwnd,
+                                HWND_TOPMOST,
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                            );
+                            // Cheap re-anchor every 500ms — catches taskbar
+                            // alignment changes (centered ↔ left) and dock-
+                            // edge moves that WM_SETTINGCHANGE misses. No
+                            // render cost: reposition only rebuilds Surface
+                            // if width changed, and EnumChildWindows is pure
+                            // Win32.
+                            app.reposition();
+                        }
                     }
                     _ => {}
                 }
@@ -867,5 +1030,76 @@ mod tests {
     fn scale_pt_rounds_up_at_half() {
         // 45 * 1.25 = 56.25 → 57 (96→120 dpi)
         assert_eq!(scale_pt(45, 120), 57);
+    }
+
+    #[test]
+    fn rect_equal_when_identical() {
+        let a = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let b = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(rect_approximately_equal(&a, &b, RECT_TOLERANCE_PX));
+    }
+
+    #[test]
+    fn rect_equal_within_tolerance() {
+        let a = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        // 1 px off on every side — still within tolerance
+        let b = RECT {
+            left: -1,
+            top: 1,
+            right: 1921,
+            bottom: 1079,
+        };
+        assert!(rect_approximately_equal(&a, &b, RECT_TOLERANCE_PX));
+    }
+
+    #[test]
+    fn rect_not_equal_outside_tolerance() {
+        let a = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        // 50 px off — clearly not fullscreen
+        let b = RECT {
+            left: 100,
+            top: 50,
+            right: 1600,
+            bottom: 900,
+        };
+        assert!(!rect_approximately_equal(&a, &b, RECT_TOLERANCE_PX));
+    }
+
+    #[test]
+    fn rect_not_equal_single_side_far_outside_tolerance() {
+        let a = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        // Only 1 side is outside tolerance but by a lot — should still fail
+        let b = RECT {
+            left: 3,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(!rect_approximately_equal(&a, &b, RECT_TOLERANCE_PX));
     }
 }
