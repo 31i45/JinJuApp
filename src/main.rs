@@ -543,123 +543,105 @@ const RECT_TOLERANCE_PX: i32 = 2;
 /// the JinJu strip currently lives on — i.e. the user is watching a movie,
 /// playing a game, or has a browser in true fullscreen.
 ///
-/// Uses two independent signals so we catch both classic Win32 fullscreen
-/// (game, media player) and modern fullscreen (Chrome F11, video overlay):
+/// Uses two independent signals so we catch both immersive / quiet modes
+/// and classic Win32 fullscreen (game, media player):
 ///
-///   1. `ShQueryUserNotificationState` — shell-level notification of
-///      `QUNS_FULL_SCREEN` or `QUNS_BUSY` (presentation, gaming, focus
-///      assist). This covers both exclusive fullscreen and borderless
-///      fullscreen apps that have told the shell they're in immersive mode.
+///   1. `ShQueryUserNotificationState` — shell-level user intent. Focus
+///      Assist / 勿扰模式 (`QUNS_QUIET_TIME`) and presentation mode
+///      (`QUNS_PRESENTATION_MODE`) are *global*: while they are on the
+///      strip hides on every display, because the user asked not to be
+///      disturbed at all.
 ///
-///   2. Foreground-window-vs-monitor rect comparison — falls back for apps
-///      that don't advertise to the shell.
+///   2. Foreground-window-vs-monitor rect comparison — covers fullscreen
+///      apps (Chrome F11, games, video players) that don't flip a shell
+///      state. This one is per-monitor: a movie on monitor 1 must not
+///      hide the strip on monitor 2.
 ///
 /// `strip_hwnd` is the JinJu window; we ask for the monitor it's on so
 /// multi-monitor setups only hide the strip that actually lives on the
 /// monitor being covered.
 unsafe fn is_fullscreen_active(strip_hwnd: HWND) -> bool {
     unsafe {
-    // --- Signal 1: shell notification state ---
-    // Dynamically loaded because older Windows SDKs don't ship the
-    // static import for this function. Falls back to Signal 2 when
-    // the function isn't available.
-    //
-    // IMPORTANT: Signal 1 tells us "some app is fullscreening *any*
-    // display in the system". We still need Signal 2 to confirm that
-    // it's the *same* display the JinJu strip lives on — otherwise a
-    // fullscreen movie on monitor 1 would hide the strip on monitor 2
-    // too, which would defeat AC-5 (multi-monitor isolation).
-    let _shell_says_fullscreen = if let Some(func) = sh_query_notification_state() {
-        let state = func();
-        state == QUNS_FULL_SCREEN || state == QUNS_BUSY
-    } else {
-        false
-    };
+        // --- Signal 1: global "do not disturb" shell states -----------
+        // Dynamically loaded because older Windows SDKs don't ship the
+        // static import for this function.
+        if let Some(func) = sh_query_notification_state()
+            && shell_state_hides_strip(func())
+        {
+            return true;
+        }
 
-    // --- Signal 2: foreground-window rect vs. monitor rect ---
-    // Get the monitor the strip currently occupies.
-    let monitor = MonitorFromWindow(strip_hwnd, MONITOR_DEFAULTTONEAREA);
-    if monitor.is_null() {
-        return false;
-    }
-    let mut mi = MONITORINFO {
-        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
-        rcMonitor: RECT {
+        // --- Signal 2: foreground-window rect vs. monitor rect ---
+        // Get the monitor the strip currently occupies.
+        let monitor = MonitorFromWindow(strip_hwnd, MONITOR_DEFAULTTONEAREA);
+        if monitor.is_null() {
+            return false;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rcWork: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut mi) == 0 {
+            return false;
+        }
+
+        // Foreground window (walk up to root in case of a child or tool
+        // window claiming foreground).
+        let fg = GetForegroundWindow();
+        if fg.is_null() || fg == strip_hwnd {
+            return false;
+        }
+        let root = GetAncestor(fg, GA_ROOT);
+        if root.is_null() || root == strip_hwnd {
+            return false;
+        }
+        let mut fg_rect = RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
-        },
-        rcWork: RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        dwFlags: 0,
-    };
-    if GetMonitorInfoW(monitor, &mut mi) == 0 {
-        return false;
-    }
+        };
+        if GetWindowRect(root, &mut fg_rect) == 0 {
+            return false;
+        }
 
-    // Foreground window (walk up to root in case of a child or tool
-    // window claiming foreground).
-    let fg = GetForegroundWindow();
-    if fg.is_null() || fg == strip_hwnd {
-        return false;
-    }
-    let root = GetAncestor(fg, GA_ROOT);
-    if root.is_null() || root == strip_hwnd {
-        return false;
-    }
-    let mut fg_rect = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    if GetWindowRect(root, &mut fg_rect) == 0 {
-        return false;
-    }
+        // Partition: is the foreground window even *on the same monitor*
+        // as the strip? If it lives on a different display then neither
+        // signal should cause the strip to hide here — that display's
+        // immersive mode doesn't concern us (AC-5 multi-monitor isolation).
+        let fg_monitor = MonitorFromWindow(root, MONITOR_DEFAULTTONEAREA);
+        let same_monitor = !fg_monitor.is_null() && fg_monitor == monitor;
 
-    // Partition: is the foreground window even *on the same monitor*
-    // as the strip? If it lives on a different display then neither
-    // signal should cause the strip to hide here — that display's
-    // immersive mode doesn't concern us (AC-5 multi-monitor isolation).
-    let fg_monitor = MonitorFromWindow(root, MONITOR_DEFAULTTONEAREA);
-    let same_monitor = !fg_monitor.is_null() && fg_monitor == monitor;
+        let rect_fits_fullscreen =
+            rect_approximately_equal(&fg_rect, &mi.rcMonitor, RECT_TOLERANCE_PX);
 
-    let rect_fits_fullscreen =
-        rect_approximately_equal(&fg_rect, &mi.rcMonitor, RECT_TOLERANCE_PX);
-
-    // Decision table — both signals must point to this monitor being
-    // covered, never let the system-level shell signal hide the strip
-    // just because *another* display has a fullscreen app running.
-    //
-    //   rect_fits_fullscreen  shell_says_fullscreen  same_monitor  Result
-    //   --------------------  --------------------  ------------  ------
-    //   true                  *                    true          hide ✅
-    //                                 (foreground window on OUR
-    //                                  monitor actually covers
-    //                                  the whole screen)
-    //   false                 true                 true          show ✅
-    //                                 (shell says SOME display
-    //                                  is fullscreen, but our fg
-    //                                  window isn't even close to
-    //                                  fullscreen — it's probably
-    //                                  a DIFFERENT display that's
-    //                                  in immersive mode)
-    //   *                     *                    false         show ✅
-    //                                 (foreground lives on
-    //                                  another display — not ours)
-    //   false                 false                true          show ✅
-    //                                 (normal window on our
-    //                                  display — strip stays)
-    same_monitor && rect_fits_fullscreen
-    // shell_says_fullscreen is intentionally NOT OR'd here — it
-    // broadens the trigger to cross-display scenarios. We still
-    // keep it above for diagnostic use if needed later.
+        // Decision — the strip hides only when the foreground window on the
+        // strip's own monitor covers that whole monitor. A fullscreen app on
+        // *another* display never hides the strip here (multi-monitor
+        // isolation). Global quiet states were already handled above.
+        same_monitor && rect_fits_fullscreen
     }
+}
+
+/// `true` for shell states that mean "the user asked not to be
+/// disturbed" at the system level — Focus Assist / 勿扰模式
+/// (`QUNS_QUIET_TIME`) and presentation mode
+/// (`QUNS_PRESENTATION_MODE`). These are user intents rather than
+/// per-monitor window facts, so the strip hides on every display.
+fn shell_state_hides_strip(state: u32) -> bool {
+    state == QUNS_QUIET_TIME || state == QUNS_PRESENTATION_MODE
 }
 
 /// `true` when `a` and `b` differ by at most `tolerance` pixels on each side.
@@ -1040,6 +1022,28 @@ mod tests {
     fn scale_pt_rounds_up_at_half() {
         // 45 * 1.25 = 56.25 → 57 (96→120 dpi)
         assert_eq!(scale_pt(45, 120), 57);
+    }
+
+    #[test]
+    fn quiet_time_and_presentation_mode_hide_strip() {
+        // Focus Assist / 勿扰模式 and presentation mode are global
+        // "do not disturb" intents — the strip must hide.
+        assert!(shell_state_hides_strip(QUNS_QUIET_TIME));
+        assert!(shell_state_hides_strip(QUNS_PRESENTATION_MODE));
+    }
+
+    #[test]
+    fn ordinary_shell_states_do_not_hide_strip() {
+        // 1 not present, 2 busy (fullscreen app anywhere), 3 D3D
+        // fullscreen, 5 accepts notifications, 7 UWP app — these must
+        // not globally hide the strip; fullscreen apps are handled
+        // per-monitor via the window-rect comparison instead.
+        for state in [1u32, 2, 3, 5, 7] {
+            assert!(
+                !shell_state_hides_strip(state),
+                "state {state} must not hide the strip globally"
+            );
+        }
     }
 
     #[test]

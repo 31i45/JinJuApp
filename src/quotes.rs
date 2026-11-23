@@ -297,7 +297,10 @@ mod tests {
 
     #[test]
     fn parse_txt_skips_comment_lines() {
-        let v = parse_txt("# === 古代经典 ===\n千里之行，始于足下。\n# comment line\n\n路虽远，行则将至。").unwrap();
+        let v = parse_txt(
+            "# === 古代经典 ===\n千里之行，始于足下。\n# comment line\n\n路虽远，行则将至。",
+        )
+        .unwrap();
         assert_eq!(v, vec!["千里之行，始于足下。", "路虽远，行则将至。"]);
     }
 

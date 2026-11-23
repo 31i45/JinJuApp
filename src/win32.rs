@@ -305,10 +305,16 @@ pub const IMAGE_ICON_APP: *const u16 = core::ptr::without_provenance(1); // winr
 // ancestor flags for GetAncestor
 pub const GA_ROOT: u32 = 2;
 
-// QUERY_USER_NOTIFICATION_STATE
-pub const QUNS_NOT_PRESENT: u32 = 0;
-pub const QUNS_BUSY: u32 = 2;
-pub const QUNS_FULL_SCREEN: u32 = 3;
+// QUERY_USER_NOTIFICATION_STATE (MSDN values):
+//   1 QUNS_NOT_PRESENT            2 QUNS_BUSY
+//   3 QUNS_RUNNING_D3D_FULL_SCREEN 4 QUNS_PRESENTATION_MODE
+//   5 QUNS_ACCEPTS_NOTIFICATIONS   6 QUNS_QUIET_TIME (Focus Assist / 勿扰)
+//   7 QUNS_APP
+// Only the two user-level "quiet" states are listed: they are global
+// intents, so the strip hides on every display. Fullscreen apps are
+// detected per-monitor by comparing window rects in main.rs.
+pub const QUNS_PRESENTATION_MODE: u32 = 4;
+pub const QUNS_QUIET_TIME: u32 = 6;
 
 // registry
 pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001usize as HKEY;
